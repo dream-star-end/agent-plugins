@@ -27,7 +27,7 @@ import urllib.request
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "Chrome/126 Safari/537.36")
 TIMEOUT = 25
-VERSION = "0.9.0"
+VERSION = "1.0.0"
 AUTH_FILE = os.path.join(os.path.expanduser("~"), ".zhihu_auth.json")
 API = "https://www.zhihu.com/api/v4"
 
@@ -48,7 +48,7 @@ def load_auth():
         return None
 
 
-def http_json(url, auth_required=True):
+def http_json(url, auth_required=True, raw=False):
     auth = load_auth()
     if auth_required and not auth:
         fail("未登录：先运行 zhihu login set（粘贴浏览器里的 z_c0 cookie）",
@@ -62,7 +62,13 @@ def http_json(url, auth_required=True):
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-                return json.loads(resp.read().decode("utf-8", "ignore"))
+                data = json.loads(resp.read().decode("utf-8", "ignore"))
+            # 知乎的业务错误以 HTTP 200 + {"error": {...}} 返回，不拦会污染解析
+            if not raw and isinstance(data, dict) and data.get("error"):
+                err = data["error"] or {}
+                fail(f"知乎接口错误: {err.get('message')}（code "
+                     f"{err.get('code')}）", code="UPSTREAM")
+            return data
         except urllib.error.HTTPError as e:
             if e.code == 403:
                 fail("知乎拒绝访问（403）：z_c0 可能已失效，重新 login set",
@@ -111,7 +117,7 @@ def cmd_login_set(args):
     with open(AUTH_FILE, "w", encoding="utf-8") as f:
         json.dump(auth, f, ensure_ascii=False)
     os.chmod(AUTH_FILE, 0o600)
-    me = http_json(f"{API}/me", auth_required=False) \
+    me = http_json(f"{API}/me", auth_required=False, raw=True) \
         if load_auth() else {}
     emit({"saved": True, "cookies": sorted(cookies),
           "me": {"name": me.get("name"), "url_token": me.get("url_token")}
@@ -124,7 +130,7 @@ def cmd_login_status(args):
         emit({"logged_in": False}, args)
         return
     try:
-        me = http_json(f"{API}/me", auth_required=False)
+        me = http_json(f"{API}/me", auth_required=False, raw=True)
         ok = bool(me.get("id"))
     except SystemExit:
         raise
@@ -146,9 +152,15 @@ def cmd_login_logout(args):
 
 def cmd_me(args):
     me = http_json(f"{API}/me")
+    followers = me.get("follower_count")
+    if followers is None and me.get("url_token"):
+        # 实测 /me 不返回 follower_count，members?include 才给（2026-10-12 验）
+        u = http_json(f"{API}/members/{me['url_token']}"
+                      "?include=follower_count")
+        followers = u.get("follower_count")
     emit({"id": me.get("id"), "url_token": me.get("url_token"),
           "name": me.get("name"), "headline": me.get("headline"),
-          "followers": me.get("follower_count"),
+          "followers": followers,
           "answers": me.get("answer_count"),
           "articles": me.get("articles_count"),
           "voteups": me.get("voteup_count"),
@@ -161,7 +173,7 @@ def _search_title(obj):
         return strip_html(obj["title"])
     q = obj.get("question")
     if isinstance(q, dict) and q.get("name"):
-        return q["name"]
+        return strip_html(q["name"])
     return None
 
 
@@ -188,30 +200,37 @@ def cmd_search(args):
 
 def cmd_question(args):
     qid = re.sub(r"\D", "", args.ref) or args.ref
-    q = http_json(f"{API}/questions/{qid}")
-    out = {"id": q.get("id"), "title": q.get("title"),
-           "detail": strip_html(q.get("detail"))[:800] or None,
-           "answers": q.get("answer_count"),
-           "followers": q.get("follower_count"),
-           "visits": q.get("visit_count"),
-           "created": time.strftime("%Y-%m-%d", time.localtime(q["created"]))
-           if q.get("created") else None,
-           "url": f"https://www.zhihu.com/question/{qid}"}
+    # 裸 /questions/{id} 实测返回 10003（参数异常），官方已不可用；
+    # 改走回答接口：标题/创建时间在每条回答的 question 对象里，
+    # 回答总数在 paging.totals 里（2026-10-12 用真实登录态响应验证）
+    limit = args.limit if args.with_answers else 1
+    ans = http_json(
+        f"{API}/questions/{qid}/answers?include=data%5B*%5D.content"
+        f",data%5B*%5D.voteup_count&limit={limit}&offset=0&sort_by=default")
+    rows = ans.get("data") or []
+    qobj = (rows[0].get("question") or {}) if rows else {}
+    out = {"id": int(qid) if str(qid).isdigit() else qid,
+           "title": qobj.get("title"),
+           "answers": (ans.get("paging") or {}).get("totals"),
+           "created": time.strftime("%Y-%m-%d",
+                                    time.localtime(qobj["created"]))
+           if qobj.get("created") else None,
+           "url": f"https://www.zhihu.com/question/{qid}",
+           "note": None if rows else "该问题暂无回答或不存在，标题无从取得"}
     if args.with_answers:
-        ans = http_json(
-            f"{API}/questions/{qid}/answers?include=data%5B*%5D.content"
-            f"&limit={args.limit}&offset=0&sort_by=default")
         out["top_answers"] = [
             {"author": (a.get("author") or {}).get("name"),
              "voteups": a.get("voteup_count"),
-             "comments": a.get("comment_count"),
              "text": strip_html(a.get("content"))[:600]}
-            for a in ans.get("data") or []]
+            for a in rows]
     emit(out, args)
 
 
 def cmd_user(args):
-    u = http_json(f"{API}/members/{args.token}")
+    # 基础 members 响应不含计数，必须 include（2026-10-12 实测）
+    u = http_json(f"{API}/members/{args.token}?include=answer_count,"
+                  "articles_count,follower_count,following_count,"
+                  "voteup_count")
     emit({"url_token": u.get("url_token"), "name": u.get("name"),
           "headline": u.get("headline"),
           "followers": u.get("follower_count"),
@@ -226,14 +245,12 @@ def cmd_fav(args):
     me = http_json(f"{API}/me")
     token = me.get("url_token")
     data = http_json(f"{API}/members/{token}/favlists")
+    # 实测 favlists 只给 id/title/is_public/url，不提供计数（include 无效）
     items = [{"id": f.get("id"), "title": f.get("title"),
-              "is_public": f.get("is_public"),
-              "answer_count": f.get("answer_count"),
-              "article_count": f.get("article_count"),
-              "follower_count": f.get("follower_count")}
+              "is_public": f.get("is_public"), "url": f.get("url")}
              for f in data.get("data") or []]
     emit({"me": me.get("name"), "results": items}, args,
-         cols=["id", "title", "answer_count", "article_count"])
+         cols=["id", "title", "is_public"])
 
 
 def cmd_doctor(args):
@@ -255,8 +272,9 @@ def cmd_doctor(args):
     checks.append({"name": "auth_cookie", "ok": bool(auth),
                    "detail": None if auth else "未设置 z_c0（zhihu login set）"})
     emit({"ok": checks[0]["ok"],
-          "note": "内容接口需 z_c0 登录 cookie 后才能通过 403；"
-                  "登录存储与状态校验已实现，内容解析待凭据实测校准",
+          "note": "内容解析已于 2026-10-12 用真实登录态响应逐字段验证并修正"
+                  "（question 改走回答接口、user/me 补 include、fav 按实测字段）；"
+                  "CLI 端到端仍待 z_c0 落盘后复验",
           "checks": checks}, args)
 
 
@@ -270,7 +288,7 @@ COMMANDS_MANIFEST = [
     {"name": "search", "usage": "zhihu search <关键词> [--limit N]",
      "desc": "综合搜索（问题/回答/文章，需登录）"},
     {"name": "question", "usage": "zhihu question <问题ID|链接> [--answers] [--limit N]",
-     "desc": "问题详情，可附高赞回答"},
+     "desc": "问题标题/回答数（取自回答接口），可附高赞回答"},
     {"name": "user", "usage": "zhihu user <url_token>", "desc": "用户资料"},
     {"name": "fav", "usage": "zhihu fav", "desc": "我的收藏夹列表（需登录）"},
     {"name": "doctor", "usage": "zhihu doctor", "desc": "通道健康检查"},

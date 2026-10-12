@@ -8,7 +8,7 @@
 | `zhihu login status / logout` | 登录状态校验 / 清除凭据 |
 | `zhihu me` | 我的资料（昵称/关注/回答/文章/获赞） |
 | `zhihu search <关键词>` | 综合搜索（问题/回答/文章） |
-| `zhihu question <ID\|链接> [--answers]` | 问题详情，可附高赞回答 |
+| `zhihu question <ID\|链接> [--answers]` | 问题标题/回答数（取自回答接口），可附高赞回答 |
 | `zhihu user <url_token>` | 用户资料 |
 | `zhihu fav` | 我的收藏夹列表 |
 | `zhihu doctor` / `zhihu commands` | 健康检查 / 能力清单 |
@@ -36,7 +36,11 @@
 
 ## 状态说明
 
-登录存储、状态校验与各内容命令已按知乎 v4 API 实现；内容解析
+内容解析已于 2026-10-12 用真实登录态响应逐字段验证并修正：裸
+/questions 接口官方返回 10003 已弃用，question 改走回答接口；
+members 系列接口必须带 include 才给计数；favlists 不提供计数。
+CLI 端到端（cookie 传输）仍待 z_c0 落盘后复验。登录存储、状态校验
+与各内容命令已按知乎 v4 API 实现；内容解析
 尚待真实 z_c0 凭据实测校准（doctor 会如实标注）。热榜功能在
 hot 插件中（免登录），本插件不重复提供。
 
