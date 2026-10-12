@@ -15,6 +15,7 @@ B站公开 Web 接口，无需登录。
 | `bili subtitle <BV号>` | 视频字幕全文（含 AI 字幕，需登录） |
 | `bili danmaku <BV号>` | 弹幕列表（时间轴/内容/发送时间） |
 | `bili me` / `bili fav` / `bili history` | 我的账号 / 收藏夹 / 观看历史（需登录） |
+| `bili like/coin/favadd/favdel/follow` | 写操作：点赞/投币/收藏/取消收藏/关注取关（需登录；点赞·收藏·关注已实测往返，投币不可撤销未做真投测试） |
 | `bili doctor` / `bili commands` | 通道健康检查 / 机器可读能力清单 |
 
 全局选项（任意位置）：`--table`、`--compact`、`--fields a,b`。

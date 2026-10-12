@@ -29,7 +29,7 @@ import urllib.request
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "Chrome/126 Safari/537.36")
 TIMEOUT = 25
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".bili_cache")
 AUTH_FILE = os.path.join(os.path.expanduser("~"), ".bili_auth.json")
 FLOW_FILE = os.path.join(CACHE_DIR, "login_flow.json")
@@ -91,6 +91,17 @@ def http_bytes(url, headers=None):
 
 def http_json(url, headers=None):
     return json.loads(http_bytes(url, headers).decode("utf-8", "ignore"))
+
+
+def http_post_json(url, form, headers=None):
+    """表单 POST（写操作专用：单次尝试不重试，防止重复提交）。"""
+    h = {"User-Agent": UA, "Referer": "https://www.bilibili.com/",
+         "Content-Type": "application/x-www-form-urlencoded"}
+    h.update(headers or {})
+    body = urllib.parse.urlencode(form).encode()
+    req = urllib.request.Request(url, data=body, headers=h)
+    with opener().open(req, timeout=TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8", "ignore"))
 
 
 def ensure_buvid():
@@ -640,6 +651,94 @@ def cmd_history(args):
     emit({"results": items}, args, cols=["viewed_at", "title", "author"])
 
 
+# ---------------------------------------------------------------- 写操作
+
+def _csrf(auth):
+    csrf = (auth.get("cookies") or {}).get("bili_jct")
+    if not csrf:
+        fail("凭据缺少 bili_jct，请重新 bili login qr", code="AUTH")
+    return csrf
+
+
+def _aid_of(ref):
+    vd = fetch_video_data(ref)
+    return vd["aid"], vd
+
+
+def _post_write(url, form, what):
+    data = http_post_json(url, form)
+    if data.get("code") != 0:
+        fail(f"{what}失败: {data.get('message')}（code {data.get('code')}）",
+             code="UPSTREAM")
+    return data
+
+
+def cmd_like(args):
+    auth = require_auth()
+    aid, vd = _aid_of(args.ref)
+    _post_write("https://api.bilibili.com/x/web-interface/archive/like",
+                {"aid": aid, "like": 2 if args.undo else 1,
+                 "csrf": _csrf(auth)}, "点赞")
+    emit({"ok": True, "action": "unlike" if args.undo else "like",
+          "aid": aid, "bvid": vd["bvid"], "title": vd.get("title")}, args)
+
+
+def cmd_coin(args):
+    auth = require_auth()
+    if args.num not in (1, 2):
+        fail("--num 只能是 1 或 2", code="INVALID")
+    aid, vd = _aid_of(args.ref)
+    _post_write("https://api.bilibili.com/x/web-interface/coin/add",
+                {"aid": aid, "multiply": args.num, "select_like": 0,
+                 "csrf": _csrf(auth)}, "投币")
+    emit({"ok": True, "action": "coin", "num": args.num,
+          "aid": aid, "bvid": vd["bvid"], "title": vd.get("title")}, args)
+
+
+def _fav_folder_id(args, mid):
+    if args.folder:
+        return int(args.folder)
+    data = http_json("https://api.bilibili.com/x/v3/fav/folder/created/"
+                     "list-all?" + urllib.parse.urlencode({"up_mid": mid}))
+    folders = (data.get("data") or {}).get("list") or []
+    if not folders:
+        fail("没有可用收藏夹", code="UPSTREAM")
+    return folders[0]["id"]
+
+
+def _fav_deal(args, add):
+    auth = require_auth()
+    nav = fetch_nav()
+    if not nav.get("isLogin"):
+        fail("凭据已失效，请重新 bili login qr", code="AUTH")
+    folder = _fav_folder_id(args, nav.get("mid"))
+    aid, vd = _aid_of(args.ref)
+    form = {"rid": aid, "type": 2, "csrf": _csrf(auth), "platform": "web"}
+    form["add_media_ids" if add else "del_media_ids"] = folder
+    _post_write("https://api.bilibili.com/x/v3/fav/resource/deal", form,
+                "收藏" if add else "取消收藏")
+    emit({"ok": True, "action": "fav_add" if add else "fav_remove",
+          "folder_id": folder, "aid": aid, "bvid": vd["bvid"],
+          "title": vd.get("title")}, args)
+
+
+def cmd_favadd(args):
+    _fav_deal(args, True)
+
+
+def cmd_favdel(args):
+    _fav_deal(args, False)
+
+
+def cmd_follow(args):
+    auth = require_auth()
+    _post_write("https://api.bilibili.com/x/relation/modify",
+                {"fid": args.mid, "act": 2 if args.undo else 1,
+                 "re_src": 11, "csrf": _csrf(auth)}, "关注")
+    emit({"ok": True, "action": "unfollow" if args.undo else "follow",
+          "mid": int(args.mid)}, args)
+
+
 def cmd_doctor(args):
     checks = []
     for name, fn in (("nav_wbi", lambda: wbi_keys()),
@@ -698,6 +797,16 @@ COMMANDS_MANIFEST = [
      "desc": "我的收藏夹列表 / 夹内视频（需登录）"},
     {"name": "history", "usage": "bili history [--limit N]",
      "desc": "观看历史（需登录）"},
+    {"name": "like", "usage": "bili like <BV号> [--undo]",
+     "desc": "点赞 / 取消点赞（写操作，需登录）"},
+    {"name": "coin", "usage": "bili coin <BV号> [--num 1|2]",
+     "desc": "投币（写操作，不可撤销，需登录）"},
+    {"name": "favadd", "usage": "bili favadd <BV号> [--folder <id>]",
+     "desc": "收藏到收藏夹（默认第一个收藏夹；写操作，需登录）"},
+    {"name": "favdel", "usage": "bili favdel <BV号> [--folder <id>]",
+     "desc": "取消收藏（写操作，需登录）"},
+    {"name": "follow", "usage": "bili follow <mid> [--undo]",
+     "desc": "关注 / 取关 UP主（写操作，需登录）"},
     {"name": "doctor", "usage": "bili doctor", "desc": "通道健康检查"},
     {"name": "commands", "usage": "bili commands", "desc": "能力清单"},
 ]
@@ -819,6 +928,31 @@ def main():
     sp.add_argument("--folder", default=None)
     sp.add_argument("--limit", type=int, default=20)
     sp.set_defaults(func=cmd_fav)
+
+    sp = sub.add_parser("like", help="点赞/取消点赞（需登录）")
+    sp.add_argument("ref")
+    sp.add_argument("--undo", action="store_true")
+    sp.set_defaults(func=cmd_like)
+
+    sp = sub.add_parser("coin", help="投币（需登录，不可撤销）")
+    sp.add_argument("ref")
+    sp.add_argument("--num", type=int, default=1)
+    sp.set_defaults(func=cmd_coin)
+
+    sp = sub.add_parser("favadd", help="收藏视频（需登录）")
+    sp.add_argument("ref")
+    sp.add_argument("--folder", default=None)
+    sp.set_defaults(func=cmd_favadd)
+
+    sp = sub.add_parser("favdel", help="取消收藏（需登录）")
+    sp.add_argument("ref")
+    sp.add_argument("--folder", default=None)
+    sp.set_defaults(func=cmd_favdel)
+
+    sp = sub.add_parser("follow", help="关注/取关 UP主（需登录）")
+    sp.add_argument("mid")
+    sp.add_argument("--undo", action="store_true")
+    sp.set_defaults(func=cmd_follow)
 
     sp = sub.add_parser("history", help="观看历史（需登录）")
     sp.add_argument("--limit", type=int, default=20)

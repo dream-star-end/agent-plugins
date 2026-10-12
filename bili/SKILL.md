@@ -22,6 +22,7 @@ description: 哔哩哔哩查询 CLI：当用户问 B站视频、UP主、排行�
 - 字幕：`bili subtitle BV1xx411c7mD`（全文 + 分段，一般需先登录才有 AI 字幕）
 - 弹幕：`bili danmaku BV1xx411c7mD --limit 500`（时间轴 + 内容）
 - 我的：`bili me`、`bili fav [--folder <id>]`（收藏夹）、`bili history`（观看历史），均需登录
+- 写操作（需登录，执行前须向用户确认）：`bili like <BV> [--undo]` 点赞/取消、`bili coin <BV> [--num 1|2]` 投币（不可撤销）、`bili favadd/favdel <BV> [--folder <id>]` 收藏/取消收藏、`bili follow <mid> [--undo]` 关注/取关
 
 全局选项（任意位置）：`--table`、`--compact`、`--fields a,b`。自检 `bili doctor`；清单 `bili commands`。
 

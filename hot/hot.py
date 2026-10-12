@@ -16,6 +16,7 @@ hot — 全网热搜聚合 CLI（供 AI agent / 脚本调用）
 仅使用 Python 标准库。
 """
 import argparse
+import html as _html
 import http.cookiejar
 import json
 import os
@@ -28,7 +29,7 @@ import urllib.request
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36"
 TIMEOUT = 25
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".hot_cache")
 WEIBO_AUTH_FILE = os.path.join(os.path.expanduser("~"), ".weibo_auth.json")
 WEIBO_FLOW_FILE = os.path.join(CACHE_DIR, "weibo_login_flow.json")
@@ -41,10 +42,10 @@ def fail(msg, code="ERROR"):
     sys.exit(1)
 
 
-def http_text(url, opener=None, headers=None, timeout=TIMEOUT):
+def http_text(url, opener=None, headers=None, timeout=TIMEOUT, data=None):
     h = {"User-Agent": UA}
     h.update(headers or {})
-    req = urllib.request.Request(url, headers=h)
+    req = urllib.request.Request(url, headers=h, data=data)
     open_fn = opener.open if opener else urllib.request.urlopen
     last = None
     for attempt in range(2):
@@ -189,6 +190,23 @@ def _auth_weibo_opener():
     return opener
 
 
+def _follow_hops(opener, url, max_hops=10):
+    """跟随 HTTP 跳转之外的 JS/meta-refresh 跳转（微博 SSO 链后半段是 JS 跳，
+    只跟 HTTP 302 会漏掉 weibo.com 会话建立步骤）。"""
+    for _ in range(max_hops):
+        t = http_text(url, opener=opener,
+                      headers={"Referer": "https://weibo.com/"})
+        m = (re.search(r'location\.replace\("([^"]+)"\)', t)
+             or re.search(r"url=&#39;([^']+)&#39;", t))
+        if not m:
+            return t
+        nxt = _html.unescape(m.group(1))
+        if nxt == url:
+            return t
+        url = nxt
+    return t
+
+
 def cmd_login_qr(args):
     opener, jar = _passport_opener()
     http_text("https://passport.weibo.com/", opener=opener)  # 预热 passport 域
@@ -257,7 +275,7 @@ def cmd_login_poll(args):
     follow.append("https://weibo.com/")
     for u in follow:
         try:
-            http_text(u, opener=opener, headers={"Referer": "https://weibo.com/"})
+            _follow_hops(opener, u)
         except Exception:
             pass
         try:
@@ -276,7 +294,24 @@ def cmd_login_poll(args):
                       "~/.hot_cache/weibo_check_success.json 供校准"},
              args)
         return
-    auth = {"cookies": cookies,
+    # 会话等级验证：热搜接口只要 passport 级会话，账号级接口（profile/发博）
+    # 需要 weibo.com 完整会话。用 profile/info 实测区分并记录。
+    level = "passport"
+    try:
+        vop, vjar = _weibo_opener()
+        for n2, v2 in cookies.items():
+            vjar.set_cookie(http.cookiejar.Cookie(
+                0, n2, v2, None, False, ".weibo.com", True, False,
+                "/", True, False, None, False, None, None, {}))
+        info = json.loads(http_text(
+            "https://weibo.com/ajax/profile/info", opener=vop,
+            headers={"Referer": "https://weibo.com/",
+                     "X-Requested-With": "XMLHttpRequest"}, timeout=30))
+        if (info.get("data") or {}).get("user"):
+            level = "full"
+    except Exception:
+        pass
+    auth = {"cookies": cookies, "session_level": level,
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}
     with open(WEIBO_AUTH_FILE, "w", encoding="utf-8") as f:
         json.dump(auth, f, ensure_ascii=False)
@@ -286,7 +321,7 @@ def cmd_login_poll(args):
     except OSError:
         pass
     emit({"logged_in": True, "saved_at": auth["saved_at"],
-          "cookies": sorted(cookies)}, args)
+          "session_level": level, "cookies": sorted(cookies)}, args)
 
 
 def cmd_login_status(args):
@@ -304,7 +339,84 @@ def cmd_login_status(args):
     except Exception:
         ok = False
     emit({"logged_in": ok, "saved_at": auth.get("saved_at"),
+          "session_level": auth.get("session_level"),
           "note": None if ok else "凭据可能已失效，请重新 hot login qr"}, args)
+
+
+# ---------------------------------------------------------------- weibo 写操作
+
+def _weibo_write_opener():
+    """登录态 opener + jar；未登录直接报错。"""
+    auth = load_weibo_auth()
+    if not auth:
+        fail("未登录微博：先运行 hot login qr 扫码登录", code="AUTH")
+    if auth.get("session_level") == "passport":
+        fail("当前是 passport 级会话（仅热搜可用），账号级写操作需要完整会话："
+             "请重新运行 hot login qr 扫码登录（新版 poll 会补全会话）",
+             code="AUTH")
+    opener, jar = _weibo_opener()
+    for name, val in (auth.get("cookies") or {}).items():
+        jar.set_cookie(http.cookiejar.Cookie(
+            0, name, val, None, False, ".weibo.com", True, False,
+            "/", True, False, None, False, None, None, {}))
+    return opener, jar
+
+
+def _weibo_xsrf(opener, jar):
+    tok = next((c.value for c in jar if c.name == "XSRF-TOKEN"), None)
+    if not tok:  # 打开主页让服务端下发
+        http_text("https://weibo.com/", opener=opener,
+                  headers={"Referer": "https://weibo.com/"})
+        tok = next((c.value for c in jar if c.name == "XSRF-TOKEN"), None)
+    if not tok:
+        fail("拿不到 XSRF-TOKEN，登录态可能已失效，请重新 hot login qr",
+             code="AUTH")
+    return tok
+
+
+def _weibo_post(path, payload):
+    opener, jar = _weibo_write_opener()
+    xsrf = _weibo_xsrf(opener, jar)
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    text = http_text("https://weibo.com" + path, opener=opener, data=body,
+                     headers={"Referer": "https://weibo.com/",
+                              "Content-Type": "application/json;charset=UTF-8",
+                              "X-Requested-With": "XMLHttpRequest",
+                              "x-xsrf-token": xsrf})
+    try:
+        data = json.loads(text)
+    except Exception:
+        fail(f"微博接口返回非 JSON: {text[:120]}", code="UPSTREAM")
+    return data
+
+
+def cmd_post(args):
+    data = _weibo_post("/ajax/statuses/update",
+                       {"content": args.text, "pic_id": "", "media": "",
+                        "vote": "", "sync_mblog": 0})
+    mid = data.get("idstr") or data.get("id")
+    if not mid:
+        fail(f"发博失败: {data.get('msg') or data.get('message') or str(data)[:160]}",
+             code="UPSTREAM")
+    emit({"ok": True, "action": "post", "id": str(mid),
+          "url": f"https://weibo.com/detail/{mid}", "text": args.text}, args)
+
+
+def cmd_del(args):
+    data = _weibo_post("/ajax/statuses/destroy", {"id": args.id})
+    if not (data.get("ok") == 1 or data.get("idstr") or data.get("id")):
+        fail(f"删博失败: {data.get('msg') or str(data)[:160]}", code="UPSTREAM")
+    emit({"ok": True, "action": "delete", "id": str(args.id)}, args)
+
+
+def cmd_like(args):
+    path = "/ajax/statuses/unlike" if args.undo else "/ajax/statuses/like"
+    data = _weibo_post(path, {"id": args.id})
+    if data.get("ok") != 1:
+        fail(f"{'取消点赞' if args.undo else '点赞'}失败: "
+             f"{data.get('msg') or str(data)[:160]}", code="UPSTREAM")
+    emit({"ok": True, "action": "unlike" if args.undo else "like",
+          "id": str(args.id)}, args)
 
 
 def cmd_login_logout(args):
@@ -400,6 +512,12 @@ COMMANDS_MANIFEST = [
      "desc": "轮询扫码状态；成功后凭据存 ~/.weibo_auth.json（0600），微博源优先用登录态"},
     {"name": "login status", "usage": "hot login status", "desc": "微博登录状态"},
     {"name": "login logout", "usage": "hot login logout", "desc": "退出微博登录"},
+    {"name": "post", "usage": "hot post <文本>",
+     "desc": "发微博（写操作，需微博登录）"},
+    {"name": "del", "usage": "hot del <微博id>",
+     "desc": "删除自己的微博（写操作，需微博登录）"},
+    {"name": "like", "usage": "hot like <微博id> [--undo]",
+     "desc": "微博点赞 / 取消点赞（写操作，需微博登录）"},
     {"name": "doctor", "usage": "hot doctor", "desc": "逐源健康检查"},
     {"name": "commands", "usage": "hot commands", "desc": "能力清单"},
 ]
@@ -485,6 +603,19 @@ def main():
     sp.set_defaults(func=lambda a: {"qr": cmd_login_qr, "poll": cmd_login_poll,
                                     "status": cmd_login_status,
                                     "logout": cmd_login_logout}[a.action](a))
+
+    sp = sub.add_parser("post", help="发微博（需微博登录）")
+    sp.add_argument("text")
+    sp.set_defaults(func=cmd_post)
+
+    sp = sub.add_parser("del", help="删除自己的微博（需微博登录）")
+    sp.add_argument("id")
+    sp.set_defaults(func=cmd_del)
+
+    sp = sub.add_parser("like", help="微博点赞/取消点赞（需微博登录）")
+    sp.add_argument("id")
+    sp.add_argument("--undo", action="store_true")
+    sp.set_defaults(func=cmd_like)
 
     sp = sub.add_parser("doctor", help="逐源健康检查")
     sp.set_defaults(func=cmd_doctor)
