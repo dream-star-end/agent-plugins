@@ -29,7 +29,7 @@ import urllib.request
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "Chrome/126 Safari/537.36")
 TIMEOUT = 25
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".bili_cache")
 AUTH_FILE = os.path.join(os.path.expanduser("~"), ".bili_auth.json")
 FLOW_FILE = os.path.join(CACHE_DIR, "login_flow.json")
@@ -730,6 +730,51 @@ def cmd_favdel(args):
     _fav_deal(args, False)
 
 
+def cmd_comment(args):
+    auth = require_auth()
+    aid, vd = _aid_of(args.ref)
+    form = {"oid": aid, "type": 1, "message": args.text, "plat": 1,
+            "csrf": _csrf(auth)}
+    if args.reply_to:
+        form["root"] = args.reply_to
+        form["parent"] = args.reply_to
+    data = _post_write("https://api.bilibili.com/x/v2/reply/add", form,
+                       "发评论")
+    rp = (data.get("data") or {}).get("reply") or {}
+    emit({"ok": True, "action": "comment", "rpid": rp.get("rpid"),
+          "aid": aid, "bvid": vd["bvid"], "text": args.text,
+          "note": "评论可能先审后发，列表出现有延迟"}, args)
+
+
+def cmd_commentdel(args):
+    auth = require_auth()
+    aid, vd = _aid_of(args.ref)
+    _post_write("https://api.bilibili.com/x/v2/reply/del",
+                {"oid": aid, "type": 1, "rpid": args.rpid,
+                 "csrf": _csrf(auth)}, "删评论")
+    emit({"ok": True, "action": "comment_delete", "rpid": int(args.rpid),
+          "aid": aid, "bvid": vd["bvid"]}, args)
+
+
+def cmd_senddm(args):
+    auth = require_auth()
+    aid, vd = _aid_of(args.ref)
+    pages = vd.get("pages") or []
+    if args.page < 1 or (pages and args.page > len(pages)):
+        fail(f"--page 超出范围（共 {len(pages)} P）", code="INVALID")
+    cid = (pages[args.page - 1].get("cid") if pages else vd.get("cid"))
+    form = {"aid": aid, "bvid": vd["bvid"], "oid": cid, "type": 1,
+            "msg": args.text, "progress": int(args.at * 1000),
+            "mode": args.mode, "fontsize": 25, "color": args.color,
+            "pool": 0, "rnd": int(time.time()),
+            "csrf": _csrf(auth)}
+    data = _post_write("https://api.bilibili.com/x/v2/dm/post", form,
+                       "发弹幕")
+    emit({"ok": True, "action": "danmaku", "dmid": (data.get("data") or {}),
+          "aid": aid, "bvid": vd["bvid"], "cid": cid, "text": args.text,
+          "at_sec": args.at}, args)
+
+
 def cmd_follow(args):
     auth = require_auth()
     _post_write("https://api.bilibili.com/x/relation/modify",
@@ -807,6 +852,13 @@ COMMANDS_MANIFEST = [
      "desc": "取消收藏（写操作，需登录）"},
     {"name": "follow", "usage": "bili follow <mid> [--undo]",
      "desc": "关注 / 取关 UP主（写操作，需登录）"},
+    {"name": "comment", "usage": "bili comment <BV号> <文本> [--reply-to <rpid>]",
+     "desc": "发评论 / 回复评论（写操作，需登录；可能先审后发）"},
+    {"name": "commentdel", "usage": "bili commentdel <BV号> <rpid>",
+     "desc": "删除自己的评论（写操作，需登录）"},
+    {"name": "senddm", "usage": "bili senddm <BV号> <文本> [--at 秒] "
+     "[--page N] [--mode 1|4|5] [--color 十进制]",
+     "desc": "发弹幕（写操作，需登录；发送后不可撤回）"},
     {"name": "doctor", "usage": "bili doctor", "desc": "通道健康检查"},
     {"name": "commands", "usage": "bili commands", "desc": "能力清单"},
 ]
@@ -953,6 +1005,26 @@ def main():
     sp.add_argument("mid")
     sp.add_argument("--undo", action="store_true")
     sp.set_defaults(func=cmd_follow)
+
+    sp = sub.add_parser("comment", help="发评论（需登录）")
+    sp.add_argument("ref")
+    sp.add_argument("text")
+    sp.add_argument("--reply-to", type=int, default=None)
+    sp.set_defaults(func=cmd_comment)
+
+    sp = sub.add_parser("commentdel", help="删除自己的评论（需登录）")
+    sp.add_argument("ref")
+    sp.add_argument("rpid")
+    sp.set_defaults(func=cmd_commentdel)
+
+    sp = sub.add_parser("senddm", help="发弹幕（需登录，不可撤回）")
+    sp.add_argument("ref")
+    sp.add_argument("text")
+    sp.add_argument("--at", type=float, default=0.0)
+    sp.add_argument("--page", type=int, default=1)
+    sp.add_argument("--mode", type=int, default=1)
+    sp.add_argument("--color", type=int, default=16777215)
+    sp.set_defaults(func=cmd_senddm)
 
     sp = sub.add_parser("history", help="观看历史（需登录）")
     sp.add_argument("--limit", type=int, default=20)
