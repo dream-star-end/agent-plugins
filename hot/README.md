@@ -11,7 +11,13 @@
 | `bili` B站热门 | 热门视频（标题/UP主） | 播放量 |
 | `weibo` 微博热搜 | 热搜词（热/沸/新标签） | 搜索热度 |
 
-微博登录（可选，提升稳定性）：`hot login qr` 生成官方二维码图 → 微博 App 扫码 → `hot login poll` 落盘凭据（~/.weibo_auth.json）；登录后微博源优先走登录态，失败自动回落访客流程。`hot login status/logout` 查看与退出。
+微博登录（可选，提升稳定性）：`hot login qr` 生成官方二维码图 → 微博 App 扫码 → `hot login poll` 落盘凭据（~/.weibo_auth.json）；登录后微博源优先走登录态，失败自动回落访客流程。`hot login status/logout` 查看与退出。poll 会补跟 SSO 的 JS 跳转并用账号级接口实测会话等级（session_level）。
+
+写操作（`hot post/del/like`，v1.2.0 已实现）：微博账号级接口对非浏览器
+客户端有 suda 风控挑战（retcode 6102）——实测完整登录 cookie（含新鲜
+扫码落盘、补跟全部跳转后）调 profile/发博仍被挑战，发博返回
+ok:-100(newlogin)。故写命令当前会被会话等级守卫拦下并说明原因，
+微博侧目前只有热搜读可用；待有真实浏览器环境通道时再启用。
 
 ```bash
 hot list                       # 全部源聚合（每源带 ok 状态）
