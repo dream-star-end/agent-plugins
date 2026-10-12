@@ -12,6 +12,7 @@ Agent 读 `SKILL.md` 学会调用 `ths` 命令，即可查询 A 股行情、K �
 | 命令 | 说明 |
 |---|---|
 | `ths quote <代码...>` | 实时行情快照（现价/涨跌幅/量额/换手/涨跌停/市值 + 买一/卖一盘口与委比） |
+| `ths rt <代码...>` / `rt status` / `rt stop` | **实时五档**（sidecar 借客户端 QuoteV2/V3 通道，完整买卖五档；见下节） |
 | `ths kline <代码> --period day\|week\|month\|60m\|30m\|15m\|5m` | K 线（前复权） |
 | `ths indicators <代码>` | 技术指标 MA/MACD/RSI/KDJ/BOLL（本地计算） |
 | `ths doctor` / `ths commands` | 通道健康检查 / 机器可读能力清单 |
@@ -62,10 +63,23 @@ Skill 会教 Agent 何时调用哪个命令、如何处理登录验证码流程�
 凭据只存本机 `~/.ths_auth.json`（权限 0600，约 30 天有效），不上传任何服务器
 （同花顺官方接口除外）。
 
+## 实时五档（ths rt / sidecar）
+
+`ths rt` 经 `sidecar/` 里的常驻 .NET 组件取完整买卖五档：该组件宿主
+加载同花顺 Linux 客户端 2.9.1.0 自己的 `Hevo.Api.Quotes` 程序集，借其
+QuoteV2/V3 DataCenter 实时通道（账号 Passport 鉴权），已实测与 Web
+网关逐值核对一致。`ths rt <代码>` 在 sidecar 未运行时自动拉起；
+`ths rt status` / `ths rt stop` 管理它。前置：客户端 2.9.1.0 已装、
+`.NET 8` 可用、先 `sidecar/build.sh` 构建、已 `ths login`、直连 TCP
+未被网络策略拦截（Muse 沙箱里需把 other_tcp 改为 Ask 并批准连接）。
+细节见 [sidecar/README.md](sidecar/README.md)。注意：sidecar 与真客户端
+同账号在线会互踢；十档/逐笔是 Level-2 付费权益，未订购账号拿不到。
+
 ## 已知边界
 
-- 行情为 Web 网关快照轮询（交易时段近实时），非逐笔推送；
-  完整五档/逐笔属客户端 GMS 协议 + Level-2 付费数据，未复刻（`quote` 只带买一/卖一）。
+- `quote` 行情为 Web 网关快照轮询（交易时段近实时），非逐笔推送，
+  盘口只带买一/卖一；完整五档走 `ths rt`（见上节），逐笔仍属
+  Level-2 付费数据，未订购拿不到。
 - 个股资金流金额、龙虎榜营业部明细位于 data.10jqka.com.cn 的 JS 反爬墙后，
   仅提供问财名单版（`rank --by fund`、`lhb`），无金额/明细数值。
 - 排行与板块成分股经问财 NLP 解析 + 行情重排，属近似榜单，输出自带来源说明。

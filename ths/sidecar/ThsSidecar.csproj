@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AssemblyName>ThsSidecar</AssemblyName>
+    <!-- C-Version (HealthReport.GetCVersion on Linux) is built from the ENTRY assembly's
+         ProductName + FileVersion; stamp identically to the real client
+         (HevoNext.B2CApp.dll: ProductName=hevo_linux_uos, FileVersion=2.9.1.0),
+         otherwise quote servers silently drop the login auth pack.
+         => This component is hard-bound to client version 2.9.1.0. -->
+    <Product>hevo_linux_uos</Product>
+    <Version>2.9.1.0</Version>
+    <FileVersion>2.9.1.0</FileVersion>
+    <EnableDefaultItems>true</EnableDefaultItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Hevo.Api.Quotes">
+      <HintPath>/opt/apps/cn.com.10jqka/files/Hevo.Api.Quotes.dll</HintPath>
+    </Reference>
+    <Reference Include="Hevo.Core">
+      <HintPath>/opt/apps/cn.com.10jqka/files/Hevo.Core.dll</HintPath>
+    </Reference>
+    <Reference Include="Hevo.Core.DataModel">
+      <HintPath>/opt/apps/cn.com.10jqka/files/Hevo.Core.DataModel.dll</HintPath>
+    </Reference>
+    <Reference Include="Hevo.Core.Common">
+      <HintPath>/opt/apps/cn.com.10jqka/files/Hevo.Core.Common.dll</HintPath>
+    </Reference>
+    <Reference Include="Hevo.Core.Interfaces">
+      <HintPath>/opt/apps/cn.com.10jqka/files/Hevo.Core.Interfaces.dll</HintPath>
+    </Reference>
+    <Reference Include="Hevo.Serialization">
+      <HintPath>/opt/apps/cn.com.10jqka/files/Hevo.Serialization.dll</HintPath>
+    </Reference>
+    <Reference Include="Normandy.Identity.Client">
+      <HintPath>/opt/apps/cn.com.10jqka/files/Normandy.Identity.Client.dll</HintPath>
+    </Reference>
+    <Reference Include="DNSResolve">
+      <HintPath>/opt/apps/cn.com.10jqka/files/DNSResolve.dll</HintPath>
+    </Reference>
+    <Reference Include="CSharpGMS">
+      <HintPath>/opt/apps/cn.com.10jqka/files/CSharpGMS.dll</HintPath>
+    </Reference>
+    <Reference Include="Hevo.Infrastructure.HttpClients">
+      <HintPath>/opt/apps/cn.com.10jqka/files/Hevo.Infrastructure.HttpClients.dll</HintPath>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>/opt/apps/cn.com.10jqka/files/Newtonsoft.Json.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Text.Encoding.CodePages">
+      <HintPath>/opt/apps/cn.com.10jqka/files/System.Text.Encoding.CodePages.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- DataCenter reads workspace/datacenter.xml next to the entry assembly. -->
+    <Content Include="datacenter.xml" Link="workspace\datacenter.xml"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

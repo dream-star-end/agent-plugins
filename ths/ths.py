@@ -14,9 +14,14 @@ ths — 同花顺命令行工具（供 AI agent / 脚本直接调用）
   * login / 云自选   : upass 短信登录（滑块验证码 + RSA 加密字段）+
                       selfstock.10jqka.com.cn/my_stock.php（协议见 ANALYSIS.md 第 7 节）；
                       凭据只存本机 ~/.ths_auth.json（0600）
+  * rt              : 常驻 sidecar（sidecar/ 子目录 .NET 组件）宿主加载客户端
+                      Hevo.Api.Quotes 程序集，借其 QuoteV2/V3 DataCenter 实时
+                      通道取完整买卖五档（账号 Passport；已实测与网关逐值核对，
+                      见 sidecar/README 或 gms_poc 报告）
 
-注意：Linux 客户端的实时行情走私有 GMS 协议（加密 + Passport 认证），
-本工具不复刻该协议，行情走同厂商 Web 网关，字段口径与客户端一致。
+注意：quote 等命令走同厂商 Web 网关，字段口径与客户端一致（网关盘口只给
+买一/卖一）；完整五档走 rt 的 sidecar 实时通道。十档/逐笔为 Level-2 付费
+权益（账号未订购时 IsLevel2=False），两条通道都拿不到，不编造。
 
 全部命令默认输出 JSON；加 --table 输出人类可读表格。
 仅使用 Python 标准库，无第三方依赖。
@@ -986,6 +991,18 @@ def cmd_doctor(args):
     run("f10_finance", c_f10)
     run("sector_registry", c_sector)
     run("login", c_login, critical=False)
+
+    def c_sidecar():
+        st = _sidecar_status()
+        if not st:
+            return "not running (starts on demand via ths rt <code>)"
+        if st.get("online"):
+            return (f"online, session_expires={st.get('session_expires')}, "
+                    f"is_level2={st.get('is_level2')}")
+        raise RuntimeError(
+            f"state={st.get('state')} last_error={st.get('last_error')}")
+
+    run("sidecar_realtime", c_sidecar, critical=False)
     ok = all(c["ok"] for c in checks if c["critical"])
     emit({"ok": ok, "checks": checks}, args)
     if not ok:
@@ -995,6 +1012,9 @@ def cmd_doctor(args):
 COMMANDS_MANIFEST = [
     {"name": "quote", "usage": "ths quote <code...> [--raw]",
      "desc": "实时行情快照：现价/涨跌幅/量额/换手/涨跌停/市值 + order_book 买一卖一与委比（仅一档）"},
+    {"name": "rt", "usage": "ths rt <code...> [--raw] | ths rt status | ths rt stop",
+     "desc": "实时五档：sidecar 借客户端 QuoteV2/V3 通道，完整买卖五档（沪/深/北交所）；"
+             "需客户端 2.9.1.0 已装、sidecar 已构建、已登录、other_tcp 已放行；未运行时自动拉起"},
     {"name": "kline", "usage": "ths kline <code> [--period day|week|month|60m|30m|15m|5m] [--count N]",
      "desc": "K线（前复权，输出含 adjust=forward）"},
     {"name": "intraday", "usage": "ths intraday <code>", "desc": "当日 1 分钟分时"},
@@ -1020,7 +1040,7 @@ COMMANDS_MANIFEST = [
     {"name": "events", "usage": "ths events <code> [--limit N]",
      "desc": "公司大事·近期重要事件（股东大会/业绩披露/回购/分红/解禁等，来自 F10 event 页）"},
     {"name": "doctor", "usage": "ths doctor",
-     "desc": "通道健康检查（行情/K线/问财/资讯/F10/板块/登录），有关键项失败时退出码 1"},
+     "desc": "通道健康检查（行情/K线/问财/资讯/F10/板块/登录/sidecar 五档[非关键]），有关键项失败时退出码 1"},
     {"name": "commands", "usage": "ths commands", "desc": "本能力清单（机器可读）"},
 ]
 
@@ -1473,6 +1493,203 @@ def cmd_watchlist(args):
              cols=["code", "name", "price", "change_pct", "amount"])
 
 
+# ---------------------------------------------------------------- realtime sidecar
+# ths rt 走常驻 sidecar（sidecar/ 子目录的 .NET 组件）：宿主加载同花顺 Linux
+# 客户端 2.9.1.0 自己的 Hevo.Api.Quotes 程序集，借其 QuoteV2/V3 DataCenter
+# 实时通道取完整五档（Web 网关只给买一/卖一）。市场前缀实证自客户端
+# Hevo.Core.Security / Market 枚举（以 Market.ParseFromOldID 在真程序集上
+# 求值：17->USHA、33->USZA、151->USTM，即沪 A / 深 A / 北交所）。
+# 前置：客户端 2.9.1.0 已装、sidecar 已构建（sidecar/build.sh）、ths login
+# 凭据有效、Direct network protocols 的 other_tcp 已放行（Ask 时连接行情
+# 服务器会逐目的地弹审批）。sidecar 会话约 24h，自身到期前自动重 verify。
+# 注意：sidecar 与真客户端同账号在线会互踢，rt 使用期间不要开真客户端。
+
+SIDECAR_SOCK = os.path.join(HOME, ".ths_sidecar.sock")
+SIDECAR_PID = os.path.join(HOME, ".ths_sidecar.pid")
+SIDECAR_LOG = os.path.join(HOME, ".ths_sidecar.log")
+SIDECAR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sidecar")
+RT_MARKETS = {"17": "USHA", "33": "USZA", "151": "USTM"}
+
+
+def _sidecar_rpc(obj, timeout=15):
+    import socket
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    buf = b""
+    try:
+        s.connect(SIDECAR_SOCK)
+        s.sendall((json.dumps(obj) + "\n").encode("utf-8"))
+        while b"\n" not in buf:
+            d = s.recv(65536)
+            if not d:
+                break
+            buf += d
+    finally:
+        s.close()
+    if not buf:
+        raise RuntimeError("sidecar 无响应")
+    return json.loads(buf.decode("utf-8").strip())
+
+
+def _sidecar_status():
+    """sidecar 状态 dict；未运行/连不上返回 None。"""
+    try:
+        return _sidecar_rpc({"cmd": "status"}, timeout=5)
+    except Exception:
+        return None
+
+
+def _sidecar_pid():
+    try:
+        with open(SIDECAR_PID) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+        return pid
+    except Exception:
+        return None
+
+
+def _find_dotnet():
+    import shutil
+    w = shutil.which("dotnet")
+    if w:
+        return w
+    cands = []
+    root = os.environ.get("DOTNET_ROOT")
+    if root:
+        cands.append(os.path.join(root, "dotnet"))
+    cands += [os.path.join(HOME, "workspace", ".dotnet", "dotnet"),
+              os.path.join(HOME, ".dotnet", "dotnet")]
+    for c in cands:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def _start_sidecar():
+    """detached 拉起 sidecar；失败（未构建/无运行时）直接 fail 给出指引。"""
+    import subprocess
+    bindir = os.path.join(SIDECAR_DIR, "bin")
+    apphost = os.path.join(bindir, "ThsSidecar")
+    dll = os.path.join(bindir, "ThsSidecar.dll")
+    env = dict(os.environ)
+    dotnet = _find_dotnet() if os.path.isfile(dll) else None
+    if dotnet:
+        # 优先 dotnet+dll：本机 dotnet 常装在非标准目录（如 ~/workspace/.dotnet），
+        # apphost 只认 DOTNET_ROOT/标准路径，直接跑 apphost 会因找不到
+        # libhostfxr 立即退出（实测）。同时给子进程补 DOTNET_ROOT 兜底。
+        cmd = [dotnet, dll]
+        env.setdefault("DOTNET_ROOT", os.path.dirname(dotnet))
+    elif os.path.isfile(apphost) and os.access(apphost, os.X_OK):
+        cmd = [apphost]
+    elif os.path.isfile(dll):
+        fail("sidecar 已构建但找不到 dotnet 运行时：安装 .NET 8 或把 "
+             "dotnet 放进 PATH", code="SIDECAR")
+    else:
+        fail("sidecar 未构建：先运行 " + os.path.join(SIDECAR_DIR, "build.sh") +
+             "（需同花顺客户端 2.9.1.0 已装 + .NET 8 SDK）", code="SIDECAR")
+    logf = open(SIDECAR_LOG, "ab")
+    subprocess.Popen(cmd, cwd=bindir, stdin=subprocess.DEVNULL,
+                     stdout=logf, stderr=subprocess.STDOUT,
+                     start_new_session=True, env=env)
+
+
+def _ensure_sidecar_online(wait_s=150):
+    st = _sidecar_status()
+    if st and st.get("online"):
+        return st
+    started = False
+    if not st:
+        _start_sidecar()
+        started = True
+    t0 = time.time()
+    while time.time() - t0 < wait_s:
+        st = _sidecar_status()
+        if st and st.get("online"):
+            return st
+        if st and st.get("state") == "error":
+            fail(f"sidecar 初始化失败: {st.get('last_error')}（见 {SIDECAR_LOG}）",
+                 code="SIDECAR")
+        if started and not st and _sidecar_pid() is None \
+                and time.time() - t0 > 10:
+            fail(f"sidecar 启动后即退出，见日志 {SIDECAR_LOG}", code="SIDECAR")
+        time.sleep(1.5)
+    st = _sidecar_status()
+    fail(f"sidecar 未能上线（state={st.get('state') if st else 'down'}，"
+         f"last_error={st.get('last_error') if st else None}），见日志 "
+         f"{SIDECAR_LOG}", code="SIDECAR")
+
+
+def cmd_rt(args):
+    targets = args.targets
+    if targets == ["status"]:
+        st = _sidecar_status()
+        if st:
+            emit({"running": True, **st, "socket": SIDECAR_SOCK}, args)
+        else:
+            emit({"running": False, "pid": _sidecar_pid(),
+                  "socket": SIDECAR_SOCK,
+                  "note": "未运行；ths rt <代码> 会自动拉起"}, args)
+        return
+    if targets == ["stop"]:
+        pid = _sidecar_pid()
+        stopped = False
+        if _sidecar_status():
+            try:
+                _sidecar_rpc({"cmd": "shutdown"}, timeout=5)
+                stopped = True
+            except Exception:
+                pass
+        if not stopped and pid:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                stopped = True
+            except Exception:
+                pass
+        emit({"stopped": stopped, "pid": pid}, args)
+        return
+    if not targets:
+        fail("用法: ths rt <代码...> | ths rt status | ths rt stop")
+    securities, metas = [], []
+    for raw in targets:
+        code, mid = normalize_code(raw)
+        prefix = RT_MARKETS.get(mid or "")
+        if not prefix:
+            fail(f"{raw}: 无法判定市场（rt 仅支持沪/深/北交所 A 股），"
+                 f"请带市场后缀如 {code}.SH / .SZ / .BJ",
+                 code="INVALID_CODE")
+        securities.append(prefix + code)
+        metas.append((code, MARKET_ID.get(mid, mid)))
+    _ensure_sidecar_online()
+    resp = _sidecar_rpc({"cmd": "realtime", "codes": securities}, timeout=120)
+    by_sec = {r.get("security"): r for r in resp.get("results", [])}
+    results = []
+    for sec, (code, mtag) in zip(securities, metas):
+        r = by_sec.get(sec) or {}
+        if r.get("error"):
+            results.append({"code": code, "market": mtag, "security": sec,
+                            "error": r["error"], "source": "sidecar_realtime"})
+            continue
+        row = {"code": code, "market": mtag, "security": sec,
+               "date_time": r.get("date_time"),
+               "latest": r.get("latest"), "prev_close": r.get("prev_close"),
+               "open": r.get("open"), "high": r.get("high"),
+               "low": r.get("low"), "close": r.get("close"),
+               "volume": r.get("volume"), "amount": r.get("amount"),
+               "bid": r.get("bid"), "ask": r.get("ask"),
+               "source": "sidecar_realtime"}
+        if r.get("latest") is not None and r.get("prev_close"):
+            row["change"] = round(r["latest"] - r["prev_close"], 4)
+            row["change_pct"] = round(
+                (r["latest"] - r["prev_close"]) / r["prev_close"] * 100, 4)
+        if args.raw:
+            row["fields"] = r.get("fields")
+        results.append(row)
+    emit(results[0] if len(results) == 1 else results, args,
+         cols=["code", "market", "latest", "change_pct", "open", "high",
+               "low", "prev_close", "volume", "amount"])
+
+
 # ---------------------------------------------------------------- output
 
 _LIST_KEYS = ("results", "watchlist", "items", "series", "sectors", "checks",
@@ -1530,7 +1747,7 @@ def emit(data, args, cols=None):
 
 def main():
     p = argparse.ArgumentParser(prog="ths", description="同花顺 CLI（agent 友好，默认 JSON 输出）")
-    p.add_argument("--version", action="version", version="ths 1.3.0")
+    p.add_argument("--version", action="version", version="ths 1.4.0")
     p.add_argument("--table", action="store_true", help="表格输出代替 JSON")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -1575,6 +1792,12 @@ def main():
                     choices=["day", "week", "month", "60m", "30m", "15m", "5m"])
     sp.add_argument("--count", type=int, default=5, help="输出最近 N 根的指标序列")
     sp.set_defaults(func=cmd_indicators)
+
+    sp = sub.add_parser("rt", help="实时五档（sidecar 借客户端 QuoteV2/V3 通道；status/stop 管理 sidecar）")
+    sp.add_argument("targets", nargs="*",
+                    help="股票代码（可多只）；或 status / stop")
+    sp.add_argument("--raw", action="store_true", help="附带原始字段号字典")
+    sp.set_defaults(func=cmd_rt)
 
     sp = sub.add_parser("doctor", help="通道健康检查（agent 自检用）")
     sp.set_defaults(func=cmd_doctor)

@@ -25,7 +25,8 @@ description: 同花顺行情 CLI：当用户问 A 股行情、K 线、分时、�
 - 自检：`ths doctor`（各通道健康检查，拿不准接口是否正常时先跑它）；`ths commands`（机器可读能力清单）
 - 全市场排行：`ths rank --by change|fall|amount|turnover|volume|fund|fundout --limit 20`（问财 NLP + 行情重排的近似榜单，引用时说明来源；fund/fundout 是主力资金净流入/流出名单，只有名次无金额）
 - 龙虎榜名单：`ths lhb --limit 30`（最近交易日；上榜原因/营业部明细拿不到，不要编造）
-- 盘口：`ths quote` 输出含 `order_book`（买一/卖一价量 + 委比 imbalance_pct）；只有一档，五档/逐笔没有，不要假装有
+- 盘口：`ths quote` 输出含 `order_book`（买一/卖一价量 + 委比 imbalance_pct），只有一档
+- 完整五档：`ths rt 600519 [代码...]`（sidecar 借客户端 QuoteV2/V3 实时通道，买卖各五档；`ths rt status` 查 sidecar 状态、`ths rt stop` 停机；首次调用自动拉起 sidecar，冷启动约 10–60 秒属正常）。前置：客户端 2.9.1.0 已装 + sidecar 已构建（`sidecar/build.sh`）+ 已登录 + other_tcp 已放行；sidecar 在线时不要开真客户端（同账号互踢）。逐笔/十档是 Level-2 付费权益，未订购拿不到，不要假装有
 - 板块：`ths sector list [--type industry|concept]`、`ths sector quote 半导体`（板块指数行情）、`ths sector stocks 半导体 --limit 30`（成分股按涨幅排序）
 - 板块/指数也可用 K 线工具：`ths kline 半导体`、`ths indicators 881121`、`ths intraday 1A0001`（目标可为代码/板块名/bk_ 前缀）
 - 公司大事：`ths events 600519 [--limit 20]`（近期重要事件：披露时间/股东大会/业绩披露/回购/分红/解禁）

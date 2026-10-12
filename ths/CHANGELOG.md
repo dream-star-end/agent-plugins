@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.4.0（2026-10-12）
+
+- 新增 `ths rt`：实时五档命令。新增常驻 sidecar（`sidecar/`，.NET 8 组件，
+  源码 + `build.sh`），宿主加载同花顺 Linux 客户端 2.9.1.0 的
+  `Hevo.Api.Quotes` 程序集，借其 QuoteV2/V3 DataCenter 通道取完整买卖
+  五档（沪 USHA / 深 USZA / 北交所 USTM，映射以 `Market.ParseFromOldID`
+  在真程序集上求值实证）；经 Unix socket IPC 对 `ths.py` 提供
+  realtime/status/shutdown，`ths rt` 未运行时自动拉起，
+  `ths rt status|stop` 管理；会话约 24h 由 sidecar 自动 re-verify 保活。
+  实测（盘后快照）：600519 五档与 2b 宿主实测及 Web 网关参考值逐值一致，
+  000977、920185 均取得完整五档。`doctor` 增加非关键项 `sidecar_realtime`。
+- 边界不变：十档/逐笔为 Level-2 付费权益（IsLevel2=False 的账号拿不到）；
+  sidecar 强绑定客户端 2.9.1.0、需 other_tcp 放行、与真客户端同账号互踢。
+
 ## 1.3.0（2026-10-12）
 
 面向 AI agent 使用的系统性优化：

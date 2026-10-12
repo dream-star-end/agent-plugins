@@ -1,0 +1,33 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<DataCenter>
+	<Debug>
+		<Cef>
+			<Console enable="false"/>
+		</Cef>
+		<trade enable="true"/>
+		<InternalLan enable="false"/>
+		<IsUseLocalBlockTree enable="false"/>
+		<Logger enable="false" level="2"/>
+		<GuestLoginNoCheck enable="false"/>
+	</Debug>
+	<DataSessions>
+		<DataSession Type="QuoteV2" IsOverwritten="false" >
+			<EndPoint IpOrUrl="122.9.82.192" Port="9601" Tags=""/>
+		</DataSession>
+		<DataSession Type="QuoteV3" IsOverwritten="false" >
+		  <EndPoint IpOrUrl="121.52.252.38" Port="8602" Tags=""/>
+		  <!--<EndPoint IpOrUrl="121.52.252.38" Port="8602" Tags="stats"/>
+		  <EndPoint IpOrUrl="121.52.252.38" Port="8602" Tags="supercalc"/>
+		  <EndPoint IpOrUrl="172.19.80.139" Port="8601" Tags="udns"/>
+		  <EndPoint IpOrUrl="183.131.2.209" Port="9601" Tags="wdcs"/>
+		  <EndPoint IpOrUrl="121.201.108.184" Port="9601" Tags="otqs"/>
+		  <EndPoint IpOrUrl="121.52.252.103" Port="9601" Tags="realorder" IsOverwritten="false"/>-->
+		</DataSession>
+		<DataSession Type="QuoteV4" IsOverwritten="false" >
+		  <EndPoint IpOrUrl="hxpns.hexin.cn" Port="9000" Tags="Personalize"  IsOverwritten="false"/>
+		</DataSession>
+		<DataSession Type="QuoteVice" IsOverwritten="false" >
+			<EndPoint IpOrUrl="10.0.13.106" Port="8601" Tags=""/>
+		</DataSession>
+	</DataSessions>
+</DataCenter>
