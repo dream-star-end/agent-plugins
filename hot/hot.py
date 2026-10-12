@@ -224,6 +224,10 @@ def cmd_login_poll(args):
         "https://passport.weibo.com/sso/v2/qrcode/check?entry=miniblog&qrid="
         + urllib.parse.quote(flow["qrid"]), opener=opener,
         headers={"Referer": "https://weibo.com/"}))
+    try:
+        jar.save(ignore_discard=True, ignore_expires=True)
+    except Exception:
+        pass
     rc = data.get("retcode")
     if rc == 50114001:
         emit({"logged_in": False, "status": "waiting_scan"}, args)
@@ -231,23 +235,48 @@ def cmd_login_poll(args):
     if rc == 50114002:
         emit({"logged_in": False, "status": "scanned_unconfirmed"}, args)
         return
+    if rc == 50114004:
+        emit({"logged_in": False, "status": "already_consumed",
+              "note": "该二维码已完成确认但凭据未落盘，请重新 hot login qr 扫码"},
+             args)
+        return
     if rc != 20000000:
         fail(f"登录轮询失败 retcode={rc}（二维码可能已过期，重新 hot login qr）",
              code="UPSTREAM")
-    # 已扫码确认：换取登录 cookie 并收割全域 cookie
-    http_text("https://passport.weibo.com/sso/v2/qrcode/login?entry=miniblog"
-              "&qrid=" + urllib.parse.quote(flow["qrid"]), opener=opener,
-              headers={"Referer": "https://weibo.com/"})
-    http_text("https://weibo.com/", opener=opener)
+    # 已扫码确认。先保存原始响应与当前 cookie（校准依据），再容错地走完
+    # 换取登录态的后续跳转；任一步断开都不丢已拿到的东西。
+    with open(os.path.join(CACHE_DIR, "weibo_check_success.json"), "w",
+              encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    d = data.get("data") or {}
+    alt = d.get("alt") if isinstance(d, dict) else None
+    follow = []
+    if alt:
+        follow += [
+            "https://passport.weibo.com/sso/v2/login?entry=miniblog&alt="
+            + urllib.parse.quote(str(alt)),
+            "https://login.sina.com.cn/sso/login.php?entry=miniblog&alt="
+            + urllib.parse.quote(str(alt))]
+    follow.append("https://weibo.com/")
+    for u in follow:
+        try:
+            http_text(u, opener=opener, headers={"Referer": "https://weibo.com/"})
+        except Exception:
+            pass
+        try:
+            jar.save(ignore_discard=True, ignore_expires=True)
+        except Exception:
+            pass
     cookies = {}
     for c in jar:
         if "weibo.com" in c.domain or "sina.com.cn" in c.domain:
             cookies[c.name] = c.value
     if "SUB" not in cookies:
-        # 再尝试主站 ajax 域常见的 SSO 状态 cookie 命名
         emit({"logged_in": False, "status": "cookies_incomplete",
               "got": sorted(cookies),
-              "note": "已确认扫码但未拿到 SUB cookie，下个版本按实际响应校准"},
+              "check_data_keys": sorted(d) if isinstance(d, dict) else str(d),
+              "note": "已确认扫码但未拿到 SUB cookie，原始响应已存 "
+                      "~/.hot_cache/weibo_check_success.json 供校准"},
              args)
         return
     auth = {"cookies": cookies,
