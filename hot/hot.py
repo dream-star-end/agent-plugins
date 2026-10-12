@@ -249,14 +249,11 @@ def cmd_login_poll(args):
               encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
     d = data.get("data") or {}
-    alt = d.get("alt") if isinstance(d, dict) else None
+    # check 成功响应直接给出一次性登录 URL（data.url，含 alt 单次令牌）：
+    # 必须原样、只调用一次——实测任何猜测的变体调用都会把 alt 作废
     follow = []
-    if alt:
-        follow += [
-            "https://passport.weibo.com/sso/v2/login?entry=miniblog&alt="
-            + urllib.parse.quote(str(alt)),
-            "https://login.sina.com.cn/sso/login.php?entry=miniblog&alt="
-            + urllib.parse.quote(str(alt))]
+    if isinstance(d, dict) and d.get("url"):
+        follow.append(d["url"])
     follow.append("https://weibo.com/")
     for u in follow:
         try:
