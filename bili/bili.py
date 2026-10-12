@@ -29,7 +29,7 @@ import urllib.request
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "Chrome/126 Safari/537.36")
 TIMEOUT = 25
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".bili_cache")
 AUTH_FILE = os.path.join(os.path.expanduser("~"), ".bili_auth.json")
 FLOW_FILE = os.path.join(CACHE_DIR, "login_flow.json")
@@ -479,9 +479,11 @@ def cmd_comments(args):
     vd = fetch_video_data(args.ref)
     aid = vd.get("aid")
     ensure_buvid()
-    sort = 2 if args.sort == "hot" else 0
-    data = http_json("https://api.bilibili.com/x/v2/reply"
-                     f"?type=1&oid={aid}&sort={sort}&pn=1&ps={args.limit}")
+    # 旧 /x/v2/reply 的 sort=0（时间）已返回空，改用 reply/main 的 mode：
+    # 实测 3=热门、2=最新（与部分文档写反，以实测为准）
+    mode = 3 if args.sort == "hot" else 2
+    data = http_json("https://api.bilibili.com/x/v2/reply/main"
+                     f"?type=1&oid={aid}&mode={mode}&ps={args.limit}")
     if data.get("code") != 0:
         fail(f"评论获取失败: {data.get('message')}", code="UPSTREAM")
     d = data.get("data") or {}
@@ -495,7 +497,7 @@ def cmd_comments(args):
                           "%Y-%m-%d %H:%M", time.localtime(r["ctime"]))
                       if r.get("ctime") else None})
     emit({"bvid": vd.get("bvid"), "title": vd.get("title"),
-          "total_comments": (d.get("page") or {}).get("count"),
+          "total_comments": (d.get("cursor") or {}).get("all_count"),
           "sort": args.sort, "results": items}, args,
          cols=["user", "like", "text"])
 
