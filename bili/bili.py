@@ -29,8 +29,12 @@ import urllib.request
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "Chrome/126 Safari/537.36")
 TIMEOUT = 25
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".bili_cache")
+AUTH_FILE = os.path.join(os.path.expanduser("~"), ".bili_auth.json")
+FLOW_FILE = os.path.join(CACHE_DIR, "login_flow.json")
+AUTH_COOKIE_NAMES = ("SESSDATA", "bili_jct", "DedeUserID",
+                     "DedeUserID__ckMd5", "sid")
 MIXIN_TABLE = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
                27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
                37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
@@ -104,6 +108,177 @@ def ensure_buvid():
         jar.save(ignore_discard=True, ignore_expires=True)
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------- auth / login
+
+def _set_cookie(jar, name, value):
+    jar.set_cookie(http.cookiejar.Cookie(
+        0, name, value, None, False, ".bilibili.com", True, False,
+        "/", True, False, None, False, None, None, {}))
+
+
+def load_auth():
+    if not os.path.exists(AUTH_FILE):
+        return None
+    try:
+        with open(AUTH_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def apply_auth():
+    """把已保存的登录凭据注入 cookie jar；返回 auth dict 或 None。"""
+    auth = load_auth()
+    if not auth:
+        return None
+    jar = opener()._jar
+    for name, val in (auth.get("cookies") or {}).items():
+        _set_cookie(jar, name, val)
+    return auth
+
+
+def require_auth():
+    auth = apply_auth()
+    if not auth:
+        fail("未登录：先运行 bili login qr 扫码登录", code="AUTH")
+    return auth
+
+
+def fetch_nav():
+    data = http_json("https://api.bilibili.com/x/web-interface/nav")
+    return data.get("data") or {}
+
+
+def _qr_png(url, path):
+    """用内置 qrcodegen（MIT，单文件）把登录 URL 渲染为 PNG（stdlib 写图）。"""
+    import struct
+    import zlib
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from qrcodegen import QrCode
+    qr = QrCode.encode_text(url, QrCode.Ecc.MEDIUM)
+    size, scale, border = qr.get_size(), 10, 4
+    px = (size + border * 2) * scale
+    raw = bytearray()
+    for y in range(px):
+        raw.append(0)
+        my = y // scale - border
+        for x in range(px):
+            mx = x // scale - border
+            dark = 0 <= mx < size and 0 <= my < size and qr.get_module(mx, my)
+            raw.append(0 if dark else 255)
+
+    def chunk(typ, data):
+        c = struct.pack(">I", len(data)) + typ + data
+        return c + struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", px, px, 8, 0, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+           + chunk(b"IEND", b""))
+    with open(path, "wb") as f:
+        f.write(png)
+    return path
+
+
+def cmd_login_qr(args):
+    ensure_buvid()
+    data = http_json("https://passport.bilibili.com/x/passport-login/web/"
+                     "qrcode/generate")
+    if data.get("code") != 0:
+        fail(f"二维码生成失败: {data.get('message')}", code="UPSTREAM")
+    d = data["data"]
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(FLOW_FILE, "w", encoding="utf-8") as f:
+        json.dump({"qrcode_key": d["qrcode_key"], "created": int(time.time())},
+                  f)
+    png = os.path.join(CACHE_DIR, "login_qr.png")
+    _qr_png(d["url"], png)
+    emit({"action": "scan_required", "qrcode_key": d["qrcode_key"],
+          "qr_png": png, "expires_in_sec": 180,
+          "hint": "用 B站 App 扫码并确认；随后运行 bili login poll"}, args)
+
+
+def cmd_login_poll(args):
+    if not os.path.exists(FLOW_FILE):
+        fail("无进行中的登录流程：先运行 bili login qr", code="INVALID")
+    flow = json.load(open(FLOW_FILE, encoding="utf-8"))
+    url = ("https://passport.bilibili.com/x/passport-login/web/qrcode/poll?"
+           + urllib.parse.urlencode({"qrcode_key": flow["qrcode_key"]}))
+    data = http_json(url)
+    d = data.get("data") or {}
+    code = d.get("code")
+    if code == 86101:
+        emit({"logged_in": False, "status": "waiting_scan",
+              "message": d.get("message")}, args)
+        return
+    if code == 86090:
+        emit({"logged_in": False, "status": "scanned_unconfirmed",
+              "message": d.get("message")}, args)
+        return
+    if code == 86038:
+        fail("二维码已过期：重新运行 bili login qr", code="EXPIRED")
+    if code != 0:
+        fail(f"登录轮询失败: {d.get('message')}", code="UPSTREAM")
+    # 成功：优先从回调 URL 解析 cookie，其次从 jar 提取
+    cookies = {}
+    cb = urllib.parse.urlparse(d.get("url", ""))
+    for k, v in urllib.parse.parse_qsl(cb.query):
+        if k in AUTH_COOKIE_NAMES:
+            cookies[k] = v
+    jar = opener()._jar
+    for c in jar:
+        if c.name in AUTH_COOKIE_NAMES and c.name not in cookies:
+            cookies[c.name] = c.value
+    if "SESSDATA" not in cookies:
+        fail("登录成功但未拿到 SESSDATA cookie", code="UPSTREAM")
+    for k, v in cookies.items():
+        _set_cookie(jar, k, v)
+    nav = fetch_nav()
+    auth = {"cookies": cookies, "mid": nav.get("mid"),
+            "uname": nav.get("uname"),
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    with open(AUTH_FILE, "w", encoding="utf-8") as f:
+        json.dump(auth, f, ensure_ascii=False)
+    os.chmod(AUTH_FILE, 0o600)
+    try:
+        os.remove(FLOW_FILE)
+    except OSError:
+        pass
+    emit({"logged_in": True, "mid": nav.get("mid"),
+          "uname": nav.get("uname"),
+          "vip": (nav.get("vipStatus") == 1),
+          "level": (nav.get("level_info") or {}).get("current_level")}, args)
+
+
+def cmd_login_status(args):
+    auth = apply_auth()
+    if not auth:
+        emit({"logged_in": False}, args)
+        return
+    nav = fetch_nav()
+    if not nav.get("isLogin"):
+        emit({"logged_in": False, "note": "凭据已失效，请重新 bili login qr",
+              "saved_at": auth.get("saved_at")}, args)
+        return
+    emit({"logged_in": True, "mid": nav.get("mid"), "uname": nav.get("uname"),
+          "level": (nav.get("level_info") or {}).get("current_level"),
+          "vip": nav.get("vipStatus") == 1, "coins": nav.get("money"),
+          "saved_at": auth.get("saved_at")}, args)
+
+
+def cmd_login_logout(args):
+    if os.path.exists(AUTH_FILE):
+        os.remove(AUTH_FILE)
+    jar = opener()._jar
+    for c in list(jar):
+        if c.name in AUTH_COOKIE_NAMES:
+            jar.clear(c.domain, c.path, c.name)
+    try:
+        jar.save(ignore_discard=True, ignore_expires=True)
+    except Exception:
+        pass
+    emit({"logged_out": True}, args)
 
 
 # ---------------------------------------------------------------- WBI
@@ -312,6 +487,157 @@ def cmd_comments(args):
          cols=["user", "like", "text"])
 
 
+def cmd_subtitle(args):
+    apply_auth()
+    vd = fetch_video_data(args.ref)
+    pages = vd.get("pages") or []
+    if not pages:
+        fail("该视频无分P信息", code="NOT_FOUND")
+    page = pages[min(args.page, len(pages)) - 1]
+    cid = page.get("cid")
+    ensure_buvid()
+    data = http_json("https://api.bilibili.com/x/player/v2?"
+                     + urllib.parse.urlencode({"bvid": vd["bvid"], "cid": cid}))
+    subs = (((data.get("data") or {}).get("subtitle") or {})
+            .get("subtitles") or [])
+    if not subs:
+        fail("该视频无字幕（或需登录后才有 AI 字幕）：先 bili login qr",
+             code="NOT_FOUND")
+    chosen = None
+    for s in subs:
+        if args.lang and s.get("lan", "").startswith(args.lang):
+            chosen = s
+            break
+    chosen = chosen or subs[0]
+    url = chosen.get("subtitle_url") or ""
+    if url.startswith("//"):
+        url = "https:" + url
+    raw = http_json(url)
+    lines = [{"start": b.get("from"), "end": b.get("to"),
+              "text": b.get("content")}
+             for b in raw.get("body", [])]
+    emit({"bvid": vd["bvid"], "title": vd.get("title"), "cid": cid,
+          "page": args.page, "lan": chosen.get("lan"),
+          "lan_doc": chosen.get("lan_doc"),
+          "available": [{"lan": s.get("lan"), "lan_doc": s.get("lan_doc")}
+                        for s in subs],
+          "lines": lines,
+          "full_text": "".join(l["text"] or "" for l in lines)}, args)
+
+
+def cmd_danmaku(args):
+    apply_auth()
+    vd = fetch_video_data(args.ref)
+    pages = vd.get("pages") or []
+    cid = pages[0].get("cid") if pages else vd.get("cid")
+    raw_dm = http_bytes("https://api.bilibili.com/x/v1/dm/list.so?"
+                        + urllib.parse.urlencode({"oid": cid}))
+    # 弹幕接口返回 raw Deflate 压缩（B站老传统），与 gzip 区分处理
+    if raw_dm[:2] != b"\x1f\x8b":
+        import zlib
+        for wbits in (-15, 15):
+            try:
+                raw_dm = zlib.decompress(raw_dm, wbits)
+                break
+            except Exception:
+                continue
+    xml = raw_dm.decode("utf-8", "ignore")
+    items = []
+    for m in re.finditer(r'<d p="([^"]+)">(.*?)</d>', xml, re.S):
+        f = m.group(1).split(",")
+        try:
+            t = float(f[0])
+        except (ValueError, IndexError):
+            continue
+        text = re.sub(r"<[^>]+>", "", m.group(2))
+        import html as _h
+        items.append({"time_sec": t, "text": _h.unescape(text),
+                      "sent_at": time.strftime(
+                          "%Y-%m-%d %H:%M",
+                          time.localtime(int(f[4]))) if len(f) > 4
+                      and f[4].isdigit() else None})
+    items.sort(key=lambda x: x["time_sec"])
+    emit({"bvid": vd["bvid"], "title": vd.get("title"), "cid": cid,
+          "total": len(items), "results": items[:args.limit]}, args,
+         cols=["time_sec", "text"])
+
+
+def cmd_me(args):
+    require_auth()
+    nav = fetch_nav()
+    if not nav.get("isLogin"):
+        fail("凭据已失效，请重新 bili login qr", code="AUTH")
+    emit({"mid": nav.get("mid"), "uname": nav.get("uname"),
+          "face": nav.get("face"),
+          "level": (nav.get("level_info") or {}).get("current_level"),
+          "vip": nav.get("vipStatus") == 1,
+          "vip_label": ((nav.get("vip") or {}).get("label") or {}).get("text"),
+          "coins": nav.get("money"), "bcoin": nav.get("wallet", {}).get(
+              "bcoin_balance") if isinstance(nav.get("wallet"), dict)
+          else None,
+          "email_verified": nav.get("email_verified") == 1,
+          "tel_verified": nav.get("tel_verified") == 1}, args)
+
+
+def cmd_fav(args):
+    require_auth()
+    nav = fetch_nav()
+    mid = nav.get("mid")
+    if args.folder:
+        data = http_json("https://api.bilibili.com/x/v3/fav/resource/list?"
+                         + urllib.parse.urlencode(
+                             {"media_id": args.folder, "pn": 1,
+                              "ps": args.limit}))
+        if data.get("code") != 0:
+            fail(f"收藏夹读取失败: {data.get('message')}", code="UPSTREAM")
+        d = data.get("data") or {}
+        items = [{"bvid": m.get("bvid") or (m.get("bv_id")),
+                  "title": m.get("title"),
+                  "author": (m.get("upper") or {}).get("name"),
+                  "play": (m.get("cnt_info") or {}).get("play"),
+                  "duration_sec": m.get("duration"),
+                  "fav_at": time.strftime(
+                      "%Y-%m-%d", time.localtime(m["fav_time"]))
+                  if m.get("fav_time") else None}
+                 for m in d.get("medias") or []]
+        emit({"folder_id": args.folder, "title": d.get("info", {}).get(
+            "title"), "total": (d.get("info") or {}).get("media_count"),
+            "results": items}, args, cols=["bvid", "title", "author", "play"])
+    else:
+        data = http_json("https://api.bilibili.com/x/v3/fav/folder/created/"
+                         "list-all?" + urllib.parse.urlencode({"up_mid": mid}))
+        if data.get("code") != 0:
+            fail(f"收藏夹列表失败: {data.get('message')}", code="UPSTREAM")
+        folders = [{"id": f.get("id"), "title": f.get("title"),
+                    "count": f.get("media_count"), "attr": f.get("attr")}
+                   for f in (data.get("data") or {}).get("list") or []]
+        emit({"mid": mid, "results": folders}, args,
+             cols=["id", "title", "count"])
+
+
+def cmd_history(args):
+    require_auth()
+    data = http_json("https://api.bilibili.com/x/web-interface/history/cursor?"
+                     + urllib.parse.urlencode({"ps": args.limit}))
+    if data.get("code") != 0:
+        fail(f"历史记录读取失败: {data.get('message')}", code="UPSTREAM")
+    items = []
+    for it in (data.get("data") or {}).get("list") or []:
+        h = it.get("history") or {}
+        items.append({"title": it.get("title"), "bvid": h.get("bvid"),
+                      "author": it.get("author_name"),
+                      "business": h.get("business"),
+                      "progress_sec": it.get("progress"),
+                      "duration_sec": it.get("duration"),
+                      "viewed_at": time.strftime(
+                          "%Y-%m-%d %H:%M",
+                          time.localtime(it["view_at"]))
+                      if it.get("view_at") else None,
+                      "url": f"https://www.bilibili.com/video/{h.get('bvid')}"
+                      if h.get("bvid") else None})
+    emit({"results": items}, args, cols=["viewed_at", "title", "author"])
+
+
 def cmd_doctor(args):
     checks = []
     for name, fn in (("nav_wbi", lambda: wbi_keys()),
@@ -355,6 +681,21 @@ COMMANDS_MANIFEST = [
     {"name": "up", "usage": "bili up <mid>", "desc": "UP主信息（粉丝/获赞/稿件数）"},
     {"name": "comments", "usage": "bili comments <BV号> [--sort hot|time] [--limit N]",
      "desc": "热门/最新评论"},
+    {"name": "login qr", "usage": "bili login qr",
+     "desc": "生成扫码登录二维码（PNG 路径输出，约 180 秒有效）"},
+    {"name": "login poll", "usage": "bili login poll",
+     "desc": "轮询扫码状态；成功后凭据存 ~/.bili_auth.json（0600）"},
+    {"name": "login status", "usage": "bili login status", "desc": "登录状态"},
+    {"name": "login logout", "usage": "bili login logout", "desc": "退出并清除凭据"},
+    {"name": "subtitle", "usage": "bili subtitle <BV号> [--page N] [--lang zh]",
+     "desc": "视频字幕全文（含 AI 字幕，一般需先登录）"},
+    {"name": "danmaku", "usage": "bili danmaku <BV号> [--limit N]",
+     "desc": "弹幕列表（时间轴/内容/发送时间）"},
+    {"name": "me", "usage": "bili me", "desc": "我的账号信息（需登录）"},
+    {"name": "fav", "usage": "bili fav [--folder <id>] [--limit N]",
+     "desc": "我的收藏夹列表 / 夹内视频（需登录）"},
+    {"name": "history", "usage": "bili history [--limit N]",
+     "desc": "观看历史（需登录）"},
     {"name": "doctor", "usage": "bili doctor", "desc": "通道健康检查"},
     {"name": "commands", "usage": "bili commands", "desc": "能力清单"},
 ]
@@ -451,6 +792,35 @@ def main():
     sp.add_argument("--sort", default="hot", choices=["hot", "time"])
     sp.add_argument("--limit", type=int, default=20)
     sp.set_defaults(func=cmd_comments)
+
+    sp = sub.add_parser("login", help="扫码登录（子命令 qr/poll/status/logout）")
+    sp.add_argument("action", choices=["qr", "poll", "status", "logout"])
+    sp.set_defaults(func=lambda a: {"qr": cmd_login_qr, "poll": cmd_login_poll,
+                                    "status": cmd_login_status,
+                                    "logout": cmd_login_logout}[a.action](a))
+
+    sp = sub.add_parser("subtitle", help="视频字幕（需登录获取 AI 字幕）")
+    sp.add_argument("ref")
+    sp.add_argument("--page", type=int, default=1)
+    sp.add_argument("--lang", default="zh")
+    sp.set_defaults(func=cmd_subtitle)
+
+    sp = sub.add_parser("danmaku", help="弹幕列表")
+    sp.add_argument("ref")
+    sp.add_argument("--limit", type=int, default=500)
+    sp.set_defaults(func=cmd_danmaku)
+
+    sp = sub.add_parser("me", help="我的账号信息（需登录）")
+    sp.set_defaults(func=cmd_me)
+
+    sp = sub.add_parser("fav", help="我的收藏夹（需登录）")
+    sp.add_argument("--folder", default=None)
+    sp.add_argument("--limit", type=int, default=20)
+    sp.set_defaults(func=cmd_fav)
+
+    sp = sub.add_parser("history", help="观看历史（需登录）")
+    sp.add_argument("--limit", type=int, default=20)
+    sp.set_defaults(func=cmd_history)
 
     sp = sub.add_parser("doctor", help="通道健康检查")
     sp.set_defaults(func=cmd_doctor)

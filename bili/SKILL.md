@@ -18,11 +18,15 @@ description: 哔哩哔哩查询 CLI：当用户问 B站视频、UP主、排行�
 - 热门：`bili popular --limit 20`
 - UP主：`bili up 3493260618106936`（mid 是数字用户 ID；粉丝数、获赞数、稿件数、签名）
 - 评论：`bili comments BV1xx411c7mD --sort hot --limit 10`（hot 热门 / time 最新）
+- 登录（全 CLI 化）：`bili login qr` 生成二维码 PNG → 用户 B站 App 扫码 → `bili login poll` 完成登录（凭据存本机 ~/.bili_auth.json）；`bili login status/logout` 查看与退出
+- 字幕：`bili subtitle BV1xx411c7mD`（全文 + 分段，一般需先登录才有 AI 字幕）
+- 弹幕：`bili danmaku BV1xx411c7mD --limit 500`（时间轴 + 内容）
+- 我的：`bili me`、`bili fav [--folder <id>]`（收藏夹）、`bili history`（观看历史），均需登录
 
 全局选项（任意位置）：`--table`、`--compact`、`--fields a,b`。自检 `bili doctor`；清单 `bili commands`。
 
 ## 注意
 
-- 免登录可达范围：搜索/详情/排行/热门/UP主/评论。**字幕与弹幕正文需要登录态，不在本插件范围**，不要声称能拿到。
+- 免登录可达范围：搜索/详情/排行/热门/UP主/评论/弹幕。**字幕（尤其 AI 字幕）与收藏夹/历史需要登录态**：未登录时先引导用户走 `bili login qr` 扫码流程，不要编造字幕内容。
 - 视频详情走视频页解析（view 接口对机房 IP 常返回 412）；播放量等数据为抓取时刻快照。
 - 搜索结果标题已去除高亮标签；`play` 是累计播放量。

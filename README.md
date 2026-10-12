@@ -19,7 +19,7 @@
 | **fx** 汇率 | 法币汇率换算 + 加密货币行情 | `rate` `currencies` `crypto` | [fx/README.md](fx/README.md) |
 | **arxiv** 论文 | arXiv 检索/分类最新/按 ID 取论文 | `search` `recent` `paper` `categories` | [arxiv/README.md](arxiv/README.md) |
 | **map** 地图 | 地理编码/路线/周边 POI（OpenStreetMap） | `geocode` `reverse` `route` `poi` | [map/README.md](map/README.md) |
-| **bili** B站 | 视频搜索/详情/排行/热门/UP主/评论 | `search` `video` `rank` `popular` `up` `comments` | [bili/README.md](bili/README.md) |
+| **bili** B站 | 视频搜索/详情/排行/热门/UP主/评论 + 扫码登录/字幕/弹幕/收藏/历史 | `search` `video` `rank` `popular` `up` `comments` `login` `subtitle` `danmaku` `me` `fav` `history` | [bili/README.md](bili/README.md) |
 
 ## 快速开始
 
@@ -46,7 +46,7 @@ cd agent-plugins
 - fund：无盘中估值（官方老接口已下线），只有日终官方净值。
 - hot：各源热度口径不同不可跨源比较；微博源依赖访客流程，最不稳定。
 - map：OSM 中国境内 POI 密度有限；Overpass 公共集群偶发慢。
-- bili：字幕/弹幕需登录态，未纳入；fx：法币为日频参考汇率（非实时牌价）。
+- bili：字幕/收藏/历史需扫码登录（已 CLI 化）；fx：法币为日频参考汇率（非实时牌价）。
 
 ## License
 

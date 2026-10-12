@@ -11,6 +11,10 @@ B站公开 Web 接口，无需登录。
 | `bili popular [--limit N]` | 热门视频 |
 | `bili up <mid>` | UP主信息：粉丝/关注/获赞/稿件数/签名/等级 |
 | `bili comments <BV号> [--sort hot\|time]` | 热门或最新评论（含点赞数） |
+| `bili login qr/poll/status/logout` | 扫码登录（全 CLI 化：生成二维码→轮询→凭据存 ~/.bili_auth.json） |
+| `bili subtitle <BV号>` | 视频字幕全文（含 AI 字幕，需登录） |
+| `bili danmaku <BV号>` | 弹幕列表（时间轴/内容/发送时间） |
+| `bili me` / `bili fav` / `bili history` | 我的账号 / 收藏夹 / 观看历史（需登录） |
 | `bili doctor` / `bili commands` | 通道健康检查 / 机器可读能力清单 |
 
 全局选项（任意位置）：`--table`、`--compact`、`--fields a,b`。
@@ -33,7 +37,7 @@ Agent 的 skills 目录即可。
   buvid 指纹经 spi 接口自动获取。
 - 视频详情的主通道是视频页 `__INITIAL_STATE__` 解析：view 接口对
   不少机房 IP 段返回 412，页面解析更稳，接口作为兜底。
-- 字幕/弹幕正文需要登录态，不在本插件范围；不含下载功能。
+- 登录为二维码流程（`bili login qr` 生成 PNG 二维码 → B站 App 扫码 → `bili login poll` 落盘凭据），凭据仅存本机 ~/.bili_auth.json（0600），二维码渲染用内置的 qrcodegen（MIT 单文件）。不含视频下载功能。
 
 ## License
 
