@@ -343,7 +343,9 @@ def fetch_video_data(ref):
         mm = re.search(r"window\.__INITIAL_STATE__\s*=\s*(\{.*?\});\(", html, re.S)
         if mm:
             vd = json.loads(mm.group(1)).get("videoData")
-            if vd:
+            # 个别稿件页面只给残缺 videoData（仅 owner/stat，如已下架稿件），
+            # 必须含 aid 才算完整，否则落到 view 接口兜底
+            if vd and vd.get("aid"):
                 return vd
     except Exception:
         pass
