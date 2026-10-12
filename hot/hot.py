@@ -28,8 +28,11 @@ import urllib.request
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36"
 TIMEOUT = 25
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".hot_cache")
+WEIBO_AUTH_FILE = os.path.join(os.path.expanduser("~"), ".weibo_auth.json")
+WEIBO_FLOW_FILE = os.path.join(CACHE_DIR, "weibo_login_flow.json")
+PASSPORT_JAR_FILE = os.path.join(CACHE_DIR, "passport_cookies.txt")
 
 
 def fail(msg, code="ERROR"):
@@ -137,7 +140,166 @@ def _weibo_visitor(opener, jar):
     jar.save(ignore_discard=True, ignore_expires=True)
 
 
+def _shape_weibo(band, limit):
+    items = []
+    for i, b in enumerate(band[:limit], 1):
+        items.append({
+            "rank": i, "title": b.get("word"),
+            "heat": b.get("num"),
+            "label": b.get("label_name") or None,
+            "url": "https://s.weibo.com/weibo?q="
+                   + urllib.parse.quote("#" + (b.get("word") or "") + "#")})
+    return items
+
+
+# ---------------------------------------------------------------- weibo login
+
+def _passport_opener():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    jar = http.cookiejar.MozillaCookieJar(PASSPORT_JAR_FILE)
+    if os.path.exists(PASSPORT_JAR_FILE):
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+        except Exception:
+            pass
+    return urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(jar)), jar
+
+
+def load_weibo_auth():
+    if not os.path.exists(WEIBO_AUTH_FILE):
+        return None
+    try:
+        with open(WEIBO_AUTH_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _auth_weibo_opener():
+    """带已保存登录 cookie 的 opener（登录态优先于访客流程）。"""
+    auth = load_weibo_auth()
+    if not auth:
+        return None
+    opener, jar = _weibo_opener()
+    for name, val in (auth.get("cookies") or {}).items():
+        jar.set_cookie(http.cookiejar.Cookie(
+            0, name, val, None, False, ".weibo.com", True, False,
+            "/", True, False, None, False, None, None, {}))
+    return opener
+
+
+def cmd_login_qr(args):
+    opener, jar = _passport_opener()
+    http_text("https://passport.weibo.com/", opener=opener)  # 预热 passport 域
+    data = json.loads(http_text(
+        "https://passport.weibo.com/sso/v2/qrcode/image?entry=miniblog&size=180",
+        opener=opener, headers={"Referer": "https://weibo.com/"}))
+    if data.get("retcode") != 20000000:
+        fail(f"二维码生成失败: {data.get('msg')}", code="UPSTREAM")
+    d = data["data"]
+    with open(WEIBO_FLOW_FILE, "w", encoding="utf-8") as f:
+        json.dump({"qrid": d["qrid"], "created": int(time.time())}, f)
+    try:
+        jar.save(ignore_discard=True, ignore_expires=True)
+    except Exception:
+        pass
+    # 官方二维码图直接下载展示（保证可扫）；链接同时给出
+    png = os.path.join(CACHE_DIR, "weibo_login_qr.png")
+    img_url = d["image"].replace("\\/", "/")
+    req = urllib.request.Request(img_url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        with open(png, "wb") as f:
+            f.write(resp.read())
+    emit({"action": "scan_required", "qrid": d["qrid"], "qr_png": png,
+          "hint": "用微博 App 扫码并确认；随后运行 hot login poll"}, args)
+
+
+def cmd_login_poll(args):
+    if not os.path.exists(WEIBO_FLOW_FILE):
+        fail("无进行中的登录流程：先运行 hot login qr", code="INVALID")
+    flow = json.load(open(WEIBO_FLOW_FILE, encoding="utf-8"))
+    opener, jar = _passport_opener()
+    data = json.loads(http_text(
+        "https://passport.weibo.com/sso/v2/qrcode/check?entry=miniblog&qrid="
+        + urllib.parse.quote(flow["qrid"]), opener=opener,
+        headers={"Referer": "https://weibo.com/"}))
+    rc = data.get("retcode")
+    if rc == 50114001:
+        emit({"logged_in": False, "status": "waiting_scan"}, args)
+        return
+    if rc == 50114002:
+        emit({"logged_in": False, "status": "scanned_unconfirmed"}, args)
+        return
+    if rc != 20000000:
+        fail(f"登录轮询失败 retcode={rc}（二维码可能已过期，重新 hot login qr）",
+             code="UPSTREAM")
+    # 已扫码确认：换取登录 cookie 并收割全域 cookie
+    http_text("https://passport.weibo.com/sso/v2/qrcode/login?entry=miniblog"
+              "&qrid=" + urllib.parse.quote(flow["qrid"]), opener=opener,
+              headers={"Referer": "https://weibo.com/"})
+    http_text("https://weibo.com/", opener=opener)
+    cookies = {}
+    for c in jar:
+        if "weibo.com" in c.domain or "sina.com.cn" in c.domain:
+            cookies[c.name] = c.value
+    if "SUB" not in cookies:
+        # 再尝试主站 ajax 域常见的 SSO 状态 cookie 命名
+        emit({"logged_in": False, "status": "cookies_incomplete",
+              "got": sorted(cookies),
+              "note": "已确认扫码但未拿到 SUB cookie，下个版本按实际响应校准"},
+             args)
+        return
+    auth = {"cookies": cookies,
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    with open(WEIBO_AUTH_FILE, "w", encoding="utf-8") as f:
+        json.dump(auth, f, ensure_ascii=False)
+    os.chmod(WEIBO_AUTH_FILE, 0o600)
+    try:
+        os.remove(WEIBO_FLOW_FILE)
+    except OSError:
+        pass
+    emit({"logged_in": True, "saved_at": auth["saved_at"],
+          "cookies": sorted(cookies)}, args)
+
+
+def cmd_login_status(args):
+    auth = load_weibo_auth()
+    if not auth:
+        emit({"logged_in": False}, args)
+        return
+    opener = _auth_weibo_opener()
+    ok = False
+    try:
+        data = json.loads(http_text(
+            "https://weibo.com/ajax/side/hotSearch", opener=opener,
+            headers={"Referer": "https://weibo.com/"}, timeout=30))
+        ok = bool((data.get("data") or {}).get("realtime"))
+    except Exception:
+        ok = False
+    emit({"logged_in": ok, "saved_at": auth.get("saved_at"),
+          "note": None if ok else "凭据可能已失效，请重新 hot login qr"}, args)
+
+
+def cmd_login_logout(args):
+    if os.path.exists(WEIBO_AUTH_FILE):
+        os.remove(WEIBO_AUTH_FILE)
+    emit({"logged_out": True}, args)
+
+
 def src_weibo(limit):
+    # 登录态优先（更稳），失败再落访客流程
+    auth_opener = _auth_weibo_opener()
+    if auth_opener is not None:
+        try:
+            data = json.loads(http_text(
+                "https://weibo.com/ajax/side/hotSearch", opener=auth_opener,
+                headers={"Referer": "https://weibo.com/"}, timeout=30))
+            band = (data.get("data") or {}).get("realtime") or []
+            if band:
+                return _shape_weibo(band, limit)
+        except Exception:
+            pass
     opener, jar = _weibo_opener()
     for attempt in range(2):
         try:
@@ -146,16 +308,7 @@ def src_weibo(limit):
                 headers={"Referer": "https://weibo.com/"}, timeout=30))
             band = (data.get("data") or {}).get("realtime") or []
             if band:
-                items = []
-                for i, b in enumerate(band[:limit], 1):
-                    items.append({
-                        "rank": i, "title": b.get("word"),
-                        "heat": b.get("num"),
-                        "label": b.get("label_name") or None,
-                        "url": "https://s.weibo.com/weibo?q="
-                               + urllib.parse.quote("#" + (b.get("word") or "")
-                                                    + "#")})
-                return items
+                return _shape_weibo(band, limit)
         except Exception:
             pass
         if attempt == 0:
@@ -215,6 +368,12 @@ COMMANDS_MANIFEST = [
     {"name": "list", "usage": "hot list [--source all|zhihu|baidu|toutiao|"
      "bili|weibo] [--limit N]",
      "desc": "热搜聚合：all 返回全部源（单源失败隔离），或指定单个源"},
+    {"name": "login qr", "usage": "hot login qr",
+     "desc": "微博扫码登录：生成官方二维码图（存 ~/.hot_cache/）"},
+    {"name": "login poll", "usage": "hot login poll",
+     "desc": "轮询扫码状态；成功后凭据存 ~/.weibo_auth.json（0600），微博源优先用登录态"},
+    {"name": "login status", "usage": "hot login status", "desc": "微博登录状态"},
+    {"name": "login logout", "usage": "hot login logout", "desc": "退出微博登录"},
     {"name": "doctor", "usage": "hot doctor", "desc": "逐源健康检查"},
     {"name": "commands", "usage": "hot commands", "desc": "能力清单"},
 ]
@@ -294,6 +453,12 @@ def main():
                     choices=["all"] + list(SOURCES))
     sp.add_argument("--limit", type=int, default=30)
     sp.set_defaults(func=cmd_list)
+
+    sp = sub.add_parser("login", help="微博扫码登录（子命令 qr/poll/status/logout）")
+    sp.add_argument("action", choices=["qr", "poll", "status", "logout"])
+    sp.set_defaults(func=lambda a: {"qr": cmd_login_qr, "poll": cmd_login_poll,
+                                    "status": cmd_login_status,
+                                    "logout": cmd_login_logout}[a.action](a))
 
     sp = sub.add_parser("doctor", help="逐源健康检查")
     sp.set_defaults(func=cmd_doctor)

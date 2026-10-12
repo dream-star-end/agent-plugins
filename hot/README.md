@@ -11,6 +11,8 @@
 | `bili` B站热门 | 热门视频（标题/UP主） | 播放量 |
 | `weibo` 微博热搜 | 热搜词（热/沸/新标签） | 搜索热度 |
 
+微博登录（可选，提升稳定性）：`hot login qr` 生成官方二维码图 → 微博 App 扫码 → `hot login poll` 落盘凭据（~/.weibo_auth.json）；登录后微博源优先走登录态，失败自动回落访客流程。`hot login status/logout` 查看与退出。
+
 ```bash
 hot list                       # 全部源聚合（每源带 ok 状态）
 hot list --source weibo        # 单个源
