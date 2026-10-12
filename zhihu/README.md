@@ -16,12 +16,23 @@
 全局选项（任意位置）：`--table`、`--compact`、`--fields a,b`。
 错误为 stderr 的 `{"error": ..., "code": ...}` + 退出码 1。
 
-## 为什么是 cookie 登录而不是扫码
+## 登录设计（面向 agent 接入）
 
-知乎网页版二维码登录接口带设备指纹签名（d_c0 / x-zse-96），
-无法像 B站、微博那样纯 API 扫码，本插件不逆向该签名。替代方案：
-浏览器登录 zhihu.com 后，在开发者工具 → 应用 → Cookie 里复制
-`z_c0` 的值（或整串 Cookie），执行 `zhihu login set '<粘贴>'` 即可。
+知乎二维码生成接口由商业设备指纹 SDK（du_web_sdk）守门：请求必须
+携带 SDK 在真实浏览器里签发的 BrowserID，服务端会校验签发记录，
+纯 API 伪造过不了（已实测 xsrf/udid/d_c0 多种组合，均 400）。
+因此本插件的登录分工是 **CLI 管流程与凭据、宿主浏览器只负责出码**：
+
+供 agent 执行的标准引导流程（用户只做扫码一步）：
+1. 用宿主浏览器打开 https://www.zhihu.com/signin ，停在扫码登录页；
+2. 用户用知乎 App 扫码并确认，浏览器跳到已登录首页；
+3. agent 读取浏览器中 zhihu.com 域的 cookie（需含 z_c0）；
+4. 执行 `zhihu login set -`（cookie 从 stdin 传入）或
+   `zhihu login set '<Cookie 串>'` 落盘到 ~/.zhihu_auth.json（0600）；
+5. `zhihu login status` 验证。之后所有 agent 共用该凭据调内容命令，
+   凭据失效时重走 1–5。
+
+不要让用户自己去开发者工具里翻 cookie——那是 agent 的活。
 
 ## 状态说明
 

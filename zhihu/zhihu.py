@@ -86,6 +86,11 @@ def strip_html(html):
 
 def cmd_login_set(args):
     raw = args.cookie.strip()
+    if raw == "-":  # 从 stdin 读，避免凭据出现在进程参数里
+        raw = sys.stdin.read().strip()
+    elif raw.startswith("@"):  # 从文件读
+        with open(raw[1:], encoding="utf-8") as f:
+            raw = f.read().strip()
     cookies = {}
     for part in raw.replace("\n", ";").split(";"):
         if "=" in part:
@@ -256,8 +261,9 @@ def cmd_doctor(args):
 
 
 COMMANDS_MANIFEST = [
-    {"name": "login set", "usage": "zhihu login set <Cookie串或z_c0值>",
-     "desc": "保存知乎登录 cookie（浏览器复制 z_c0）到 ~/.zhihu_auth.json"},
+    {"name": "login set", "usage": "zhihu login set <Cookie串|-|@文件>",
+     "desc": "保存知乎登录 cookie 到 ~/.zhihu_auth.json；- 表示从 stdin 读、"
+             "@文件 表示从文件读（agent 从浏览器取 cookie 后用此落盘）"},
     {"name": "login status", "usage": "zhihu login status", "desc": "登录状态校验"},
     {"name": "login logout", "usage": "zhihu login logout", "desc": "清除凭据"},
     {"name": "me", "usage": "zhihu me", "desc": "我的知乎资料（需登录）"},
