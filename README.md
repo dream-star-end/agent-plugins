@@ -1,8 +1,8 @@
 # agent-plugins · AI Agent 插件家族
 
-给 AI Agent 用的工具插件集：**17 个零依赖 CLI + 配套 Skill**，覆盖行情、
+给 AI Agent 用的工具插件集：**18 个零依赖 CLI + 配套 Skill**，覆盖行情、
 天气、基金、热搜、汇率、论文、地图、视频、知乎、宏观、全球行情、
-生物医学、学术全库、播客、订阅、音乐、网易云。每个插件独立可用，统一规格：
+生物医学、学术全库、播客、订阅、音乐、网易云、Claude Code API 壳。每个插件独立可用，统一规格：
 
 - 纯 Python 3 标准库，**零第三方依赖**，克隆即跑
 - 默认 **JSON 输出**；全局选项 `--table` / `--compact` / `--fields a,b`
@@ -30,6 +30,7 @@
 | **rss** 订阅 | RSS/Atom 通用订阅阅读 | `read` `feeds` | [rss/README.md](rss/README.md) |
 | **music** 音乐元数据 | 歌曲/专辑/歌手检索 + 30 秒试听（iTunes + MusicBrainz） | `search` `lookup` `mb` | [music/README.md](music/README.md) |
 | **netease** 网易云 | 网易云音乐搜索/歌词/歌单/榜单（匿名接口面） | `search` `song` `lyric` `playlist` `toplist` | [netease/README.md](netease/README.md) |
+| **cc-api** Claude Code API 壳 | 给 cc 套壳：壳内常驻交互会话，对外提供 Anthropic 兼容 API（/v1/messages + SSE） | `serve` `doctor` `sessions` `config` | [cc-api/README.md](cc-api/README.md) |
 
 ## 快速开始
 
